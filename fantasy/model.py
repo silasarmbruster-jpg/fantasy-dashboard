@@ -1,12 +1,12 @@
 """Baut aus den rohen Sleeper-/FantasyCalc-Antworten das normalisierte
 data.json-Modell, das das Frontend konsumiert."""
 
-import math
 from datetime import datetime, timezone
 
-from . import config, waiver, startsit, tradefinder, planner, league_feed, sellhigh
+from . import config, waiver, startsit, tradefinder, planner, league_feed, sellhigh, playoffs
 from . import roster_strength
 from .scoring import score as score_stats
+from .util import win_probability
 
 MATCHUP_POSITIONS = ("QB", "RB", "WR", "TE", "K")
 
@@ -21,15 +21,6 @@ def _team_name_for(user):
     if name and name.strip():
         return name.strip()
     return user.get("display_name") or "Unbekanntes Team"
-
-
-def _win_probability(diff, sigma=18.0):
-    """Heuristische Siegwahrscheinlichkeit aus der Projection-Differenz
-    (Normalverteilung um 0 mit sigma als angenommene wöchentliche Streuung).
-    Kein echtes Vorhersagemodell, nur eine grobe Orientierung."""
-    z = diff / (sigma * math.sqrt(2))
-    prob = 0.5 * (1 + math.erf(z))
-    return round(max(0.01, min(0.99, prob)) * 100, 1)
 
 
 def _compute_byes(schedule, season_weeks=18):
@@ -290,7 +281,9 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
           weekly_stats_by_week, weekly_proj, trade_values, trending_add_list,
           trending_drop_list, relevant_player_ids, my_username,
           future_matchups_by_week=None, transactions=None,
-          vegas_odds=None, trade_value_history=None):
+          vegas_odds=None, trade_value_history=None,
+          historical_matchups_by_week=None, sim_matchups_by_week=None,
+          source_status=None):
     season = state["season"]
     current_week = state.get("display_week") or state.get("week") or 1
     scoring_settings = league.get("scoring_settings", {})
@@ -444,7 +437,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         win_prob = None
         if opp_side is not None:
             diff = me_side["projected_points"] - opp_side["projected_points"]
-            win_prob = _win_probability(diff)
+            win_prob = win_probability(diff)
 
         matchup_block = {
             "week": current_week,
@@ -462,6 +455,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             "week": current_week,
             "total_rosters": league["settings"]["num_teams"],
             "playoff_week_start": league["settings"].get("playoff_week_start"),
+            "playoff_teams": league["settings"].get("playoff_teams"),
             "trade_deadline": league["settings"].get("trade_deadline"),
             "roster_positions": roster_positions,
         },
@@ -480,12 +474,24 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
     }
     data["waiver"] = waiver.compute(data, league_raw=league, my_roster_raw=my_roster_obj, raw_transactions=transactions or [])
     data["start_sit"] = startsit.compute(data)
-    data["trade_finder"] = tradefinder.compute(data)
     data["planner"] = planner.compute(data, future_matchups_by_week or {})
+    data["trade_finder"] = tradefinder.compute(data)
+    data["position_strength"] = roster_strength.position_rank_matrix(teams, players)
     data["league_feed"] = {
         "power_ranking": league_feed.power_ranking(teams),
         "transactions": league_feed.normalize_transactions(transactions or [], roster_by_id),
+        "scouting_profiles": league_feed.scouting_profiles(
+            teams, transactions or [],
+            roster_strength.weakness_matrix(teams, players),
+            data["position_strength"],
+        ),
     }
     data["sell_buy"] = sellhigh.compute(data)
-    data["position_strength"] = roster_strength.position_rank_matrix(teams, players)
+    data["playoffs"] = playoffs.compute(
+        teams,
+        historical_matchups_by_week or {},
+        sim_matchups_by_week or {},
+        league["settings"].get("playoff_teams") or 6,
+    )
+    data["meta"] = {"source_status": source_status or {}}
     return data
