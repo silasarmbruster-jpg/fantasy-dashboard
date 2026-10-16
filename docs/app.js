@@ -5,7 +5,7 @@
   const TABS = [
     { id: "overview", label: "Übersicht", icon: "🏠", ready: true },
     { id: "roster", label: "Mein Roster", icon: "👤", ready: true },
-    { id: "startsit", label: "Start/Sit", icon: "🔁", ready: false, phase: "Phase 3" },
+    { id: "startsit", label: "Start/Sit", icon: "🔁", ready: true },
     { id: "waiver", label: "Waiver Wire", icon: "📈", ready: true },
     { id: "players", label: "Alle Spieler", icon: "📋", ready: true },
     { id: "tradefinder", label: "Trade Finder", icon: "🔄", ready: false, phase: "Phase 4" },
@@ -89,6 +89,7 @@
     else if (tabId === "roster") root.appendChild(renderRoster());
     else if (tabId === "players") root.appendChild(renderPlayers());
     else if (tabId === "waiver") root.appendChild(renderWaiver());
+    else if (tabId === "startsit") root.appendChild(renderStartSit());
   }
 
   function renderNav(activeId) {
@@ -174,7 +175,7 @@
     grid.appendChild(renderInjuryAlertsCard());
     grid.appendChild(renderTrendingCard());
     grid.appendChild(renderWaiverTipsCard());
-    grid.appendChild(renderComingSoonMiniCard("Start/Sit-Hinweise", "🔁", "startsit", "Phase 3"));
+    grid.appendChild(renderStartSitTipsCard());
     frag.appendChild(grid);
 
     const grid2 = el("div", { class: "grid grid-2" });
@@ -314,6 +315,32 @@
       : el("div", { class: "empty-state" }, "Keine Waiver-Empfehlungen verfügbar.");
     return el("div", { class: "card" }, [
       el("div", { class: "card-title" }, ["Top Waiver-Tipps", el("button", { class: "see-all", onclick: () => navigateTo("waiver") }, "Alle ansehen")]),
+      body,
+    ]);
+  }
+
+  function renderStartSitTipsCard() {
+    const decisions = (DATA.start_sit.decisions || []).slice(0, 3);
+    const body = decisions.length
+      ? el(
+          "div",
+          { class: "mini-list" },
+          decisions.map((d) => {
+            const rec = DATA.players[d.recommended_player_id];
+            const cur = d.current_player_id ? DATA.players[d.current_player_id] : null;
+            return el("div", { class: "mini-item", style: "display:block;" }, [
+              el("div", {}, [
+                cur ? playerLink(cur.id) : "–",
+                " → ",
+                el("strong", {}, playerLink(rec.id)),
+              ]),
+              el("div", { class: "reason" }, `${d.slot} · ${d.delta >= 0 ? "+" : ""}${d.delta} Pkt. erwartet`),
+            ]);
+          })
+        )
+      : el("div", { class: "empty-state" }, "Dein Lineup ist bereits optimal gesetzt.");
+    return el("div", { class: "card" }, [
+      el("div", { class: "card-title" }, ["Start/Sit-Hinweise", el("button", { class: "see-all", onclick: () => navigateTo("startsit") }, "Alle ansehen")]),
       body,
     ]);
   }
@@ -582,6 +609,68 @@
         : el("div", { class: "empty-state" }, "Keine Spieler gefunden."),
     ]);
     return wrap;
+  }
+
+  // ---------- Start/Sit ----------
+  function renderStartSit() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+
+    const ss = DATA.start_sit;
+
+    frag.appendChild(el("div", { class: "section-label" }, "Empfohlenes Lineup"));
+    const rows = ss.recommended_slots.map((s) => {
+      const p = s.player_id ? DATA.players[s.player_id] : null;
+      if (!p) {
+        return el("tr", {}, [el("td", {}, el("span", { class: "slot-tag" }, s.slot)), el("td", { colspan: "3" }, "–")]);
+      }
+      const st = statusInfo(p);
+      const changed = (ss.decisions || []).some((d) => d.recommended_player_id === p.id);
+      return el("tr", { style: changed ? "background:var(--accent-soft);" : "" }, [
+        el("td", {}, el("span", { class: "slot-tag" }, s.slot)),
+        el("td", {}, [posChip(p.position), " ", playerLink(p.id), changed ? el("span", { style: "color:var(--accent);font-size:11px;margin-left:6px;", title: "Wechsel empfohlen" }, "NEU") : null].filter(Boolean)),
+        el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), ` ${p.team || "FA"} · ${p.matchup_opponent ? "vs " + p.matchup_opponent : ""}`]),
+        el("td", {}, fmt1(s.effective_projection)),
+      ]);
+    });
+    frag.appendChild(
+      el("div", { class: "card table-wrap" }, [
+        el("table", { class: "lineup-table" }, [
+          el("thead", {}, el("tr", {}, [el("th", {}, "Slot"), el("th", {}, "Spieler"), el("th", {}, "Team/Gegner"), el("th", {}, "Proj.")])),
+          el("tbody", {}, rows),
+        ]),
+      ])
+    );
+
+    frag.appendChild(el("div", { class: "section-label" }, "Entscheidungen"));
+    const decisions = ss.decisions || [];
+    if (!decisions.length) {
+      frag.appendChild(el("div", { class: "card empty-state" }, "Dein aktuelles Lineup ist bereits optimal gesetzt — keine Änderungen empfohlen."));
+    } else {
+      decisions.forEach((d) => {
+        const rec = DATA.players[d.recommended_player_id];
+        const cur = d.current_player_id ? DATA.players[d.current_player_id] : null;
+        frag.appendChild(
+          el("div", { class: "card" }, [
+            el("div", { style: "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;" }, [
+              el("div", { style: "display:flex;align-items:center;gap:10px;font-size:15px;font-weight:700;" }, [
+                cur ? el("span", {}, [posChip(cur.position), " ", playerLink(cur.id)]) : el("span", { style: "color:var(--text-faint);" }, "Bank"),
+                el("span", { style: "color:var(--text-faint);" }, "→"),
+                el("span", {}, [posChip(rec.position), " ", playerLink(rec.id)]),
+              ]),
+              el("div", { style: `font-weight:800;color:${d.delta >= 0 ? "var(--status-good)" : "var(--status-bad)"};` }, `${d.delta >= 0 ? "+" : ""}${d.delta} Pkt.`),
+            ]),
+            el(
+              "ul",
+              { style: "margin:10px 0 0;padding-left:18px;font-size:12.5px;color:var(--text-muted);" },
+              d.reasons.map((r) => el("li", {}, r))
+            ),
+          ])
+        );
+      });
+    }
+
+    return frag;
   }
 
   // ---------- Waiver Wire ----------
