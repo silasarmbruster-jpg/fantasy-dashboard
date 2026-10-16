@@ -46,6 +46,10 @@
   }
   function fmt1(n) { return (n === null || n === undefined) ? "–" : Number(n).toFixed(1); }
   function fmtInt(n) { return (n === null || n === undefined) ? "–" : Math.round(Number(n)).toLocaleString("de-DE"); }
+  // Fehlender Marktwert (z.B. tiefe Bankspieler ohne FantasyCalc-Notierung)
+  // soll erkennbar "kein Marktwert" heißen statt als leeres Feld/bloßer
+  // Strich zu wirken.
+  function fmtTradeValue(v) { return (v === null || v === undefined || v === 0) ? el("span", { class: "null-value" }, "kein Marktwert") : fmtInt(v); }
   // Einheitliche Icons über Lucide (keine Emojis als UI-Elemente). icon()
   // erzeugt nur den Platzhalter <i data-lucide>; refreshIcons() muss danach
   // aufgerufen werden, damit Lucide ihn durch das Inline-SVG ersetzt.
@@ -465,7 +469,7 @@
       heroWinprob.appendChild(bar);
       heroWinprob.appendChild(
         el("div", { class: "winprob-label" }, [
-          el("span", {}, `${winProb}% Sieg-Chance (Schätzung)`),
+          el("span", {}, `${winProb}% Sieg-Chance (Simulation, 10.000 Durchläufe)`),
           el("span", {}, `${(100 - winProb).toFixed(1)}%`),
         ])
       );
@@ -565,6 +569,7 @@
     lineup_upgrade: "Lineup-Upgrade",
     trending: "Trending",
     handcuffs: "Handcuffs",
+    ir_stashes: "IR-Stashes",
     breakouts: "Breakouts",
     streaming: "Streaming",
   };
@@ -589,6 +594,8 @@
         const starter = DATA.players[e.handcuff_for_player_id];
         return { id: e.player_id, note: `Handcuff für ${starter ? starter.name : "?"}${e.is_mine ? " (dein Spieler)" : ""}` };
       });
+    } else if (key === "ir_stashes") {
+      items = (DATA.waiver.ir_stashes || []).slice(0, 3).map((e) => ({ id: e.player_id, note: `Status ${e.injury_status} · Ø ${fmt1(e.season_avg)} Pkt./Sp. vor der Verletzung` }));
     } else if (key === "breakouts") {
       items = (DATA.waiver.breakouts || []).slice(0, 3).map((id) => ({ id, note: "Junger Spieler mit steigender Nutzung" }));
     } else if (key === "streaming") {
@@ -788,7 +795,7 @@
         el("td", {}, fmt1(p.projection_week)),
         el("td", {}, fmt1(p.avg_last3)),
         el("td", {}, fmt1(p.season_avg)),
-        el("td", {}, p.trade_value ? fmtInt(p.trade_value) : "–"),
+        el("td", {}, fmtTradeValue(p.trade_value)),
       ]);
     }).filter(Boolean);
 
@@ -833,7 +840,7 @@
   // ---------- Vergleichsmodus (zwei Spieler nebeneinander) ----------
   const compareState = { visible: false, a: null, b: null };
   const COMPARE_STATS = [
-    { key: "trade_value", label: "Trade-Wert", fmt: fmtInt },
+    { key: "trade_value", label: "Trade-Wert", fmt: fmtTradeValue },
     { key: "season_avg", label: "Ø Saison", fmt: fmt1 },
     { key: "avg_last3", label: "Ø letzte 3", fmt: fmt1 },
     { key: "projection_week", label: "Projektion", fmt: fmt1 },
@@ -1136,7 +1143,7 @@
         el("td", {}, fmt1(p.touches_pg)),
         el("td", {}, fmt1(p.redzone_pg)),
         el("td", {}, fmt1(p.projection_week)),
-        el("td", {}, p.trade_value ? fmtInt(p.trade_value) : "–"),
+        el("td", {}, fmtTradeValue(p.trade_value)),
       ]);
     });
 
@@ -1518,7 +1525,7 @@
             el("div", { class: "mini-item" }, [
               playerTag(p.id),
               el("div", { style: "display:flex;align-items:center;gap:8px;" }, [
-                el("span", {}, p.trade_value ? fmtInt(p.trade_value) : "–"),
+                el("span", {}, fmtTradeValue(p.trade_value)),
                 el(
                   "button",
                   {
@@ -2397,21 +2404,33 @@
           ]),
         ]),
         el("td", {}, fmt1(r.projected_final_wins)),
+        el("td", {}, `#${fmt1(r.projected_rank)}`),
+      ])
+    );
+    const keyGameRows = (po.key_games || []).map((k) =>
+      el("div", { class: "card", style: "margin-bottom:8px;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;" }, [
+          el("div", { style: "font-weight:700;" }, `Woche ${k.week} vs. ${k.opponent_team_name}`),
+          el("div", { style: `font-weight:800;color:${k.swing >= 5 ? "var(--status-warn)" : "var(--text-muted)"};` }, `±${k.swing} Prozentpunkte`),
+        ]),
+        el("div", { style: "font-size:12px;color:var(--text-muted);margin-top:4px;" }, `Playoff-Chance bei Sieg: ${k.playoff_probability_if_win}% · bei Niederlage: ${k.playoff_probability_if_loss}%`),
       ])
     );
     return el("div", {}, [
       myEntry
         ? el("div", { class: "card", style: `border-left:4px solid ${myEntry.playoff_probability >= 50 ? "var(--status-good)" : "var(--status-bad)"};` }, [
             el("div", { style: "font-size:28px;font-weight:800;" }, `${myEntry.playoff_probability}%`),
-            el("div", { style: "font-size:12.5px;color:var(--text-muted);" }, `Playoff-Chance von ${DATA.me.team_name} · voraussichtlich ${fmt1(myEntry.projected_final_wins)} Siege am Saisonende`),
+            el("div", { style: "font-size:12.5px;color:var(--text-muted);" }, `Playoff-Chance von ${DATA.me.team_name} · voraussichtlich ${fmt1(myEntry.projected_final_wins)} Siege, wahrscheinlicher Platz #${fmt1(myEntry.projected_rank)} am Saisonende`),
           ])
         : null,
       el("div", { class: "card table-wrap", style: "margin-top:10px;" }, [
         el("table", { class: "data-table" }, [
-          el("thead", {}, el("tr", {}, [el("th", {}, "Team"), el("th", {}, "Bilanz"), el("th", {}, "Playoff-Chance"), el("th", {}, "Ø Siege (Hochrechnung)")])),
+          el("thead", {}, el("tr", {}, [el("th", {}, "Team"), el("th", {}, "Bilanz"), el("th", {}, "Playoff-Chance"), el("th", {}, "Ø Siege (Hochrechnung)"), el("th", {}, "Ø Platz")])),
           el("tbody", {}, rows),
         ]),
       ]),
+      keyGameRows.length ? el("div", { class: "section-label" }, "Wichtigste Spiele für deine Playoff-Chance") : null,
+      ...keyGameRows,
       el("div", { style: "font-size:11px;color:var(--text-muted);margin-top:8px;" }, `${po.method_note} (${po.trials.toLocaleString("de-DE")} Durchläufe, ${po.playoff_teams} Playoff-Plätze.)`),
     ].filter(Boolean));
   }
@@ -2634,6 +2653,7 @@
     lineup_upgrade: "Lineup-Upgrade",
     trending: "Trending",
     handcuffs: "Handcuffs",
+    ir_stashes: "IR-Stashes",
     breakouts: "Breakouts",
     streaming: "Streaming",
   };
@@ -2790,6 +2810,10 @@
           drop_candidate_id: _drop_candidate_client("RB"),
         });
       });
+    } else if (tab === "ir_stashes") {
+      cards = (DATA.waiver.ir_stashes || []).map((e) =>
+        buildWaiverPlayerCard({ player_id: e.player_id, reasons: [e.note], drop_candidate_id: null })
+      );
     } else if (tab === "breakouts") {
       cards = (DATA.waiver.breakouts || []).map((id) => {
         const p = DATA.players[id];
@@ -2902,7 +2926,7 @@
       )
     );
 
-    const rest = (p.rest_of_season || []).slice(0, 6);
+    const rest = ((p.team && DATA.team_schedules[p.team]) || []).slice(0, 6);
     const restRow = rest.length
       ? el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;" }, rest.map((g) =>
           el("span", { class: "pos-chip", style: "background:var(--card-border);color:var(--text);" }, `W${g.week} ${g.home ? "vs" : "@"} ${g.opponent}`)
@@ -2925,7 +2949,7 @@
         el("div", {}, [
           el("div", { class: "name" }, p.name),
           el("div", { class: "player-meta", style: "margin-top:4px;font-size:12.5px;" }, [posChip(p.position), ` ${p.team || "FA"} · Alter ${p.age ?? "–"} · Bye ${p.bye_week ? "W" + p.bye_week : "–"}`]),
-          el("div", { style: "margin-top:6px;font-size:18px;font-weight:800;" }, p.trade_value ? fmtInt(p.trade_value) : "–"),
+          el("div", { style: "margin-top:6px;font-size:18px;font-weight:800;" }, fmtTradeValue(p.trade_value)),
           el("div", { style: "font-size:10.5px;color:var(--text-muted);text-transform:uppercase;" }, "Trade-Wert"),
         ]),
       ])
@@ -2949,7 +2973,7 @@
       statTile("Projektion", fmt1(p.projection_week)),
       statTile("Ø letzte 3", fmt1(p.avg_last3)),
       statTile("Ø Saison", fmt1(p.season_avg)),
-      statTile("Trade-Wert", p.trade_value ? fmtInt(p.trade_value) : "–"),
+      statTile("Trade-Wert", fmtTradeValue(p.trade_value)),
       statTile("Pos-Rang (Wert)", p.trade_pos_rank ? `#${p.trade_pos_rank}` : "–"),
       statTile("Trending", p.trending_add ? `+${fmtInt(p.trending_add)}` : p.trending_drop ? `-${fmtInt(p.trending_drop)}` : "–"),
     ]);
