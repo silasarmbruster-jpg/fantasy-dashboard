@@ -503,7 +503,6 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             data["position_strength"],
         ),
     }
-    data["trade_finder"] = tradefinder.compute(data, league_rules or {}, bye_weeks)
     data["playoffs"] = playoffs.compute(
         teams,
         historical_matchups_by_week or {},
@@ -511,5 +510,6 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         league["settings"].get("playoff_teams") or 6,
         my_roster_id=me_roster["roster_id"],
     )
+    data["trade_finder"] = tradefinder.compute(data, league_rules or {}, bye_weeks)
     data["meta"] = {"source_status": source_status or {}}
     return data
