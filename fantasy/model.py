@@ -480,8 +480,8 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
     }
     data["waiver"] = waiver.compute(data, league_raw=league, my_roster_raw=my_roster_obj, raw_transactions=transactions or [])
     data["start_sit"] = startsit.compute(data)
-    data["trade_finder"] = tradefinder.compute(data)
     data["planner"] = planner.compute(data, future_matchups_by_week or {})
+    data["trade_finder"] = tradefinder.compute(data)
     data["league_feed"] = {
         "power_ranking": league_feed.power_ranking(teams),
         "transactions": league_feed.normalize_transactions(transactions or [], roster_by_id),
