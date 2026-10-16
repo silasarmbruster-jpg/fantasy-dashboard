@@ -283,7 +283,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
           future_matchups_by_week=None, transactions=None,
           vegas_odds=None, trade_value_history=None,
           historical_matchups_by_week=None, sim_matchups_by_week=None,
-          source_status=None):
+          source_status=None, league_rules=None):
     season = state["season"]
     current_week = state.get("display_week") or state.get("week") or 1
     scoring_settings = league.get("scoring_settings", {})
@@ -458,6 +458,9 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             "playoff_teams": league["settings"].get("playoff_teams"),
             "trade_deadline": league["settings"].get("trade_deadline"),
             "roster_positions": roster_positions,
+            "league_type": (league_rules or {}).get("league_type"),
+            "is_dynasty": (league_rules or {}).get("is_dynasty", False),
+            "super_flex": (league_rules or {}).get("super_flex", False),
         },
         "me": {
             **me_roster,
@@ -475,8 +478,8 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
     data["waiver"] = waiver.compute(data, league_raw=league, my_roster_raw=my_roster_obj, raw_transactions=transactions or [])
     data["start_sit"] = startsit.compute(data)
     data["planner"] = planner.compute(data, future_matchups_by_week or {})
-    data["trade_finder"] = tradefinder.compute(data)
     data["position_strength"] = roster_strength.position_rank_matrix(teams, players)
+    data["sell_buy"] = sellhigh.compute(data)
     data["league_feed"] = {
         "power_ranking": league_feed.power_ranking(teams),
         "transactions": league_feed.normalize_transactions(transactions or [], roster_by_id),
@@ -486,7 +489,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             data["position_strength"],
         ),
     }
-    data["sell_buy"] = sellhigh.compute(data)
+    data["trade_finder"] = tradefinder.compute(data, league_rules or {}, bye_weeks)
     data["playoffs"] = playoffs.compute(
         teams,
         historical_matchups_by_week or {},

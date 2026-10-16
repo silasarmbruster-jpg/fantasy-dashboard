@@ -1,3 +1,4 @@
-# build.py nutzt aktuell nur die Python-Standardbibliothek (urllib, json).
-# Diese Datei existiert für künftige Phasen (z.B. nflverse-Fallback via pandas)
-# und damit der CI-Workflow immer "pip install -r requirements.txt" ausführen kann.
+# build.py selbst nutzt nur die Python-Standardbibliothek (urllib, json).
+# pytest wird für die tests/-Suite gebraucht (Trade-Finder-Invarianten),
+# die build.py bei jedem Lauf als Build-Gate ausführt (siehe build.py).
+pytest
