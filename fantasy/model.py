@@ -4,7 +4,7 @@ data.json-Modell, das das Frontend konsumiert."""
 import math
 from datetime import datetime, timezone
 
-from . import config, waiver, startsit
+from . import config, waiver, startsit, tradefinder
 from .scoring import score as score_stats
 
 MATCHUP_POSITIONS = ("QB", "RB", "WR", "TE", "K")
@@ -409,4 +409,5 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
     }
     data["waiver"] = waiver.compute(data)
     data["start_sit"] = startsit.compute(data)
+    data["trade_finder"] = tradefinder.compute(data)
     return data
