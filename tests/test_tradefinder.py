@@ -466,3 +466,25 @@ def test_real_build_partner_notlage_items_reference_a_real_gap():
     for item in notlage.get("items", []):
         anlass = item.get("anlass", "")
         assert "Bedarf" in anlass and "Woche" in anlass, f"Notlage-Idee ohne erkennbare Lücken-Angabe: {anlass}"
+
+
+def test_real_build_ideas_are_diverse_across_anchor_and_partner():
+    # Jede Trade-Ideen-Kategorie darf nicht von einem einzigen wertvollsten
+    # Abgabe-Spieler oder einem einzigen Partner-Team dominiert werden - sonst
+    # wirken z.B. "Spitze verbessern" und "Breite aufbauen" wie geringfügige
+    # Varianten desselben einen Trades.
+    data = _load_real_data()
+    ideas = data["trade_finder"]["ideas"]
+    players = data["players"]
+    violations = []
+    for key, idea in ideas.items():
+        anchor_counts, partner_counts = {}, {}
+        for item in idea.get("items", []):
+            anchor = max(item["give_player_ids"], key=lambda pid: (players.get(pid) or {}).get("trade_value") or 0)
+            anchor_counts[anchor] = anchor_counts.get(anchor, 0) + 1
+            partner_counts[item["roster_id"]] = partner_counts.get(item["roster_id"], 0) + 1
+        if anchor_counts and max(anchor_counts.values()) > tf.MAX_IDEA_PER_ANCHOR:
+            violations.append((key, "anchor", max(anchor_counts, key=anchor_counts.get)))
+        if partner_counts and max(partner_counts.values()) > tf.MAX_IDEA_PER_PARTNER:
+            violations.append((key, "partner", max(partner_counts, key=partner_counts.get)))
+    assert not violations, f"Kategorien ohne Vielfalt bei Abgabe-Spieler/Partner: {violations}"

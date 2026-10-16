@@ -61,6 +61,22 @@
       try { window.lucide.createIcons(); } catch (e) { /* ignore */ }
     }
   }
+  // render() ersetzt synchron den kompletten #view-root, d.h. Elemente unter
+  // dem Klickpunkt rutschen nach oben nach (z.B. das "X" zum Entfernen eines
+  // Spielers aus der Trade-Suche). Ein ungeduldiger Doppelklick trifft dann
+  // beim zweiten Klick ein anderes, inzwischen dorthin gerutschtes Element -
+  // z.B. das "X" des NÄCHSTEN Spielers, der dadurch versehentlich mitentfernt
+  // wird. guardedClick() sperrt für einen Frame jeden weiteren so markierten
+  // Klick, bis der Browser den Reflow sichtbar gemalt hat.
+  let inputLockUntilPaint = false;
+  function guardedClick(fn) {
+    return (e) => {
+      if (inputLockUntilPaint) return;
+      inputLockUntilPaint = true;
+      fn(e);
+      requestAnimationFrame(() => requestAnimationFrame(() => { inputLockUntilPaint = false; }));
+    };
+  }
   // Kurzes Hochzählen für die prominentesten Zahlen (Punkte, Matchup-Score).
   // Sparsam eingesetzt, nur an wenigen Stellen - kein durchgängiges Feature.
   function animateNumber(node, target, { decimals = 1, duration = 500, suffix = "" } = {}) {
@@ -2068,7 +2084,7 @@
       frag.appendChild(
         el("div", { style: "display:flex;align-items:center;justify-content:space-between;margin:18px 0 8px;" }, [
           el("div", { style: "font-weight:700;font-size:15px;" }, [playerLink(pid), mode === "give" ? " - was bekomme ich dafür realistisch?" : " - was müsste ich dafür geben?"]),
-          el("button", { class: "btn", style: "padding:2px 8px;", onclick: () => { setTradeBlockStatus(pid, null); render(); } }, [icon("x", { style: "width:11px;height:11px;" })]),
+          el("button", { class: "btn", style: "padding:2px 8px;", onclick: guardedClick(() => { setTradeBlockStatus(pid, null); render(); }) }, [icon("x", { style: "width:11px;height:11px;" })]),
         ])
       );
       frag.appendChild(renderPlayerPackages(pid, mode));
