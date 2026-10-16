@@ -1,6 +1,8 @@
 """Start/Sit-Optimizer: bestes Lineup für die aktuelle Woche aus Projection,
-Matchup-Faktor, Verletzungsstatus und Bye Week, inkl. Begründungen für jede
-Abweichung vom aktuell gesetzten Lineup."""
+Matchup-Faktor (inkl. Gegner-Rang gegen die Position), Vegas-Odds, Target-/
+Rushing-Share, Form der letzten 3 Wochen und Verletzungsstatus. Liefert pro
+Slot eine Begründung und für jede Abweichung vom aktuell gesetzten Lineup
+eine A-vs-B-Entscheidung mit Konfidenz."""
 
 FLEX_ELIGIBLE = {"RB", "WR", "TE"}
 
@@ -74,25 +76,124 @@ def _best_lineup(pool, roster_positions):
     return result
 
 
-def _reasons(current, rec, current_week):
+def _form_note(p):
+    if (p.get("games_played") or 0) < 2:
+        return None
+    season_avg = p.get("season_avg") or 0
+    avg_last3 = p.get("avg_last3") or 0
+    if season_avg <= 0.5:
+        return None
+    diff_pct = (avg_last3 - season_avg) / season_avg
+    if diff_pct >= 0.15:
+        return f"Aufwärtstrend: {avg_last3} Pkt./Sp. in den letzten 3 Wochen vs. {season_avg} Saison-Schnitt"
+    if diff_pct <= -0.15:
+        return f"Abwärtstrend: {avg_last3} Pkt./Sp. in den letzten 3 Wochen vs. {season_avg} Saison-Schnitt"
+    return None
+
+
+def _usage_notes(p):
+    notes = []
+    if p["position"] in ("WR", "TE") and p.get("target_share"):
+        notes.append(f"{p['target_share']}% Target Share")
+    if p["position"] == "RB" and p.get("rush_share"):
+        notes.append(f"{p['rush_share']}% Rushing Share")
+    if p.get("snap_pct"):
+        notes.append(f"{p['snap_pct']}% Snap-Anteil")
+    if p.get("redzone_pg"):
+        notes.append(f"{p['redzone_pg']} Red-Zone-Chancen/Spiel")
+    return notes
+
+
+def _matchup_note(p):
+    if not p.get("matchup_opponent"):
+        return None
+    rest = p.get("rest_of_season") or []
+    loc = "zuhause" if rest and rest[0].get("home") else "auswärts"
+    note = f"{'Zuhause' if loc == 'zuhause' else 'Auswärts'} vs. {p['matchup_opponent']}"
+    if p.get("matchup_rank") and p.get("matchup_rank_of"):
+        rk, of = p["matchup_rank"], p["matchup_rank_of"]
+        tier = "schwache Verteidigung" if rk > of * 0.66 else "starke Verteidigung" if rk <= of * 0.33 else "durchschnittliche Verteidigung"
+        note += f" · Rang {rk}/{of} gegen {p['position']} ({tier})"
+    v = p.get("vegas")
+    if v and v.get("over_under") is not None:
+        fav_txt = "Favorit" if v.get("favorite") else "Außenseiter" if v.get("favorite") is False else None
+        extra = f", {fav_txt} ({v['details']})" if fav_txt and v.get("details") else (f" ({v['details']})" if v.get("details") else "")
+        note += f" · Vegas O/U {v['over_under']}{extra}"
+    return note
+
+
+def _injury_note(p):
+    if not p.get("injury_status"):
+        return None
+    label = STATUS_LABELS_DE.get(p["injury_status"], p["injury_status"])
+    body = f" ({p['injury_body_part']})" if p.get("injury_body_part") else ""
+    practice = (
+        f" · Training: {p['practice_description']}" if p.get("practice_description")
+        else " · keine Trainingsstatus-Daten verfügbar"
+    )
+    return f"Status: {label}{body}{practice}"
+
+
+def _slot_reasons(p):
+    """Vollständige Begründung für EINEN empfohlenen Spieler (unabhängig
+    davon, ob er bereits startet oder neu hereinkommt)."""
+    notes = []
+    m = _matchup_note(p)
+    if m:
+        notes.append(m)
+    notes.extend(_usage_notes(p))
+    form = _form_note(p)
+    if form:
+        notes.append(form)
+    inj = _injury_note(p)
+    if inj:
+        notes.append(inj)
+    if not notes:
+        notes.append(f"Projektion: {p.get('projection_week', 0)} Pkt.")
+    return notes
+
+
+def _confidence(delta):
+    if abs(delta) >= 4:
+        return "hoch"
+    if abs(delta) >= 1.5:
+        return "mittel"
+    return "niedrig"
+
+
+def _decision_reasons(current, rec, current_week):
     reasons = []
     if current is None:
         reasons.append("Slot war nicht besetzt.")
+        reasons.extend(_slot_reasons(rec))
         return reasons
     if current.get("bye_week") == current_week:
         reasons.append(f"{current['name']} hat diese Woche Bye.")
     elif current.get("injury_status") in HARD_OUT_STATUSES:
-        label = STATUS_LABELS_DE.get(current["injury_status"], current["injury_status"])
-        reasons.append(f"{current['name']} ist {label}.")
+        reasons.append(_injury_note(current) or f"{current['name']} ist nicht einsatzfähig.")
     else:
         reasons.append(f"Höhere erwartete Punktzahl: {rec['_eff']} vs. {current['_eff']} Pkt.")
-        if current.get("injury_status") in SOFT_INJURY_MULTIPLIER:
-            reasons.append(f"{current['name']} ist {STATUS_LABELS_DE.get(current['injury_status'], current['injury_status'])}.")
-    if rec.get("matchup_factor", 1.0) >= 1.08:
-        reasons.append(f"{rec['name']} trifft auf eine schwache Verteidigung gegen {rec['position']}.")
-    if current.get("matchup_factor", 1.0) <= 0.92 and current.get("injury_status") not in HARD_OUT_STATUSES:
-        reasons.append(f"{current['name']} trifft auf eine starke Verteidigung gegen {current['position']}.")
+        inj = _injury_note(current)
+        if inj:
+            reasons.append(f"{current['name']}: {inj}")
+    reasons.extend(_slot_reasons(rec))
     return reasons
+
+
+def _duel_summary(data):
+    m = data.get("matchup")
+    if not m or not m.get("opponent"):
+        return None
+    wp = m.get("win_probability_me")
+    if wp is None:
+        return None
+    if wp >= 60:
+        stance, advice = "favorit", "Du bist Favorit in diesem Duell - bei knappen Entscheidungen lohnt sich eher der Spieler mit dem sichereren Floor als der mit dem höheren Risiko."
+    elif wp <= 40:
+        stance, advice = "underdog", "Du bist Außenseiter in diesem Duell - bei knappen Entscheidungen kann der Spieler mit dem höheren Ceiling (Boom-Potenzial) die bessere Wahl sein, auch bei etwas niedrigerer Projection."
+    else:
+        stance, advice = "ausgeglichen", "Knappes Duell laut Projection - einzelne Start/Sit-Entscheidungen können hier den Ausschlag geben."
+    return {"win_probability_me": wp, "stance": stance, "advice": advice}
 
 
 def compute(data):
@@ -121,6 +222,7 @@ def compute(data):
             "slot": slot_label,
             "player_id": rec_p["id"] if rec_p else None,
             "effective_projection": rec_p["_eff"] if rec_p else 0.0,
+            "reasons": _slot_reasons(rec_p) if rec_p else [],
         }
         for slot_label, rec_p in zip(roster_positions, recommended)
     ]
@@ -148,12 +250,14 @@ def compute(data):
         partner = same_pos[0] if same_pos else (remaining_bench[0] if remaining_bench else None)
         if partner:
             remaining_bench.remove(partner)
+        delta = round(rec_p["_eff"] - (partner["_eff"] if partner else 0.0), 2)
         decisions.append({
             "slot": slot_label,
             "current_player_id": partner["id"] if partner else None,
             "recommended_player_id": rec_p["id"],
-            "delta": round(rec_p["_eff"] - (partner["_eff"] if partner else 0.0), 2),
-            "reasons": _reasons(partner, rec_p, current_week),
+            "delta": delta,
+            "confidence": _confidence(delta),
+            "reasons": _decision_reasons(partner, rec_p, current_week),
         })
 
     decisions.sort(key=lambda d: d["delta"], reverse=True)
@@ -162,4 +266,5 @@ def compute(data):
         "week": current_week,
         "recommended_slots": recommended_slots,
         "decisions": decisions,
+        "duel_summary": _duel_summary(data),
     }
