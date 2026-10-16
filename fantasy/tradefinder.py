@@ -59,6 +59,7 @@ TARGET_MIN_TRADE_VALUE = 150  # Zielspieler-Index nur für Spieler mit nennenswe
 IDEA_LIMIT = 10
 MAX_IDEA_PER_ANCHOR = 2  # derselbe wertvollste Abgabe-Spieler erscheint höchstens 2x je Ideen-Kategorie
 MAX_IDEA_PER_PARTNER = 3  # dasselbe Partner-Team erscheint höchstens 3x je Ideen-Kategorie
+TOP_PICK_COUNT = 3  # Anzahl der kategorieübergreifend als "Top-Empfehlung" markierten Ideen
 
 PERFORMANCE_BUDGET_SECONDS = 45.0
 
@@ -1151,6 +1152,20 @@ def compute(data, rules, bye_weeks_by_team):
         "Keine Starter mit Bye in Woche 13/14 oder zwei+ schweren Playoff-Matchups gefunden."
     )
     ideas["playoff_vorbereitung"] = _idea_result(playoff_items, playoff_empty_reason)
+
+    # Kategorieübergreifende "Top-Empfehlung": markiert die insgesamt
+    # stärksten Ideen (nach _score, über alle Kategorien hinweg), damit nicht
+    # jede der ~7x10 Ideen einzeln verglichen werden muss, um die besten zu finden.
+    all_idea_items = [item for idea in ideas.values() for item in idea.get("items", [])]
+    seen_top_combo = set()
+    for item in sorted(all_idea_items, key=_score, reverse=True):
+        key = _combo_key(item)
+        if key in seen_top_combo:
+            continue
+        item["top_empfehlung"] = True
+        seen_top_combo.add(key)
+        if len(seen_top_combo) >= TOP_PICK_COUNT:
+            break
 
     team_pools = {
         str(t["roster_id"]): [

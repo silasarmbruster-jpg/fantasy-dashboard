@@ -488,3 +488,29 @@ def test_real_build_ideas_are_diverse_across_anchor_and_partner():
         if partner_counts and max(partner_counts.values()) > tf.MAX_IDEA_PER_PARTNER:
             violations.append((key, "partner", max(partner_counts, key=partner_counts.get)))
     assert not violations, f"Kategorien ohne Vielfalt bei Abgabe-Spieler/Partner: {violations}"
+
+
+def test_real_build_top_empfehlung_marks_at_most_top_pick_count_ideas():
+    # Die kategorieübergreifende "Top-Empfehlung"-Markierung darf nur die
+    # besten paar EINZIGARTIGEN Trades auszeichnen (dieselbe Idee kann in
+    # mehreren Kategorien auftauchen, zählt für die Markierung aber nur 1x),
+    # sonst verliert sie ihren Sinn.
+    data = _load_real_data()
+    ideas = data["trade_finder"]["ideas"]
+    all_items = [item for idea in ideas.values() for item in idea.get("items", [])]
+    marked = [item for item in all_items if item.get("top_empfehlung")]
+    assert 0 < len(marked) <= tf.TOP_PICK_COUNT
+
+    def combo_key(item):
+        return (item["roster_id"], tuple(item["give_player_ids"]), tuple(item["get_player_ids"]))
+
+    marked_combos = {combo_key(item) for item in marked}
+    assert len(marked_combos) == len(marked), "Top-Empfehlung darf denselben Trade nicht mehrfach als eigene Idee zählen"
+
+    best_score_by_combo = {}
+    for item in all_items:
+        key = combo_key(item)
+        best_score_by_combo[key] = max(best_score_by_combo.get(key, float("-inf")), tf._score(item))
+
+    top_combos_by_score = sorted(best_score_by_combo, key=best_score_by_combo.get, reverse=True)[:tf.TOP_PICK_COUNT]
+    assert marked_combos == set(top_combos_by_score), "Top-Empfehlung muss genau die besten einzigartigen Trades markieren"
