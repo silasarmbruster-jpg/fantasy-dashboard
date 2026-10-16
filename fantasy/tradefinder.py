@@ -57,6 +57,8 @@ MAX_PACKAGES_PER_FORMAT = 3  # Standardformate: pro Spieler/Format vorgehalten, 
 EXTRA_FORMAT_CAP = 2  # "Mehr Formate"-Formate: seltener angesehen, kleinerer Vorrat je Spieler
 TARGET_MIN_TRADE_VALUE = 150  # Zielspieler-Index nur für Spieler mit nennenswertem Marktwert (Datei-Größe)
 IDEA_LIMIT = 10
+MAX_IDEA_PER_ANCHOR = 2  # derselbe wertvollste Abgabe-Spieler erscheint höchstens 2x je Ideen-Kategorie
+MAX_IDEA_PER_PARTNER = 3  # dasselbe Partner-Team erscheint höchstens 3x je Ideen-Kategorie
 
 PERFORMANCE_BUDGET_SECONDS = 45.0
 
@@ -916,21 +918,42 @@ def compute(data, rules, bye_weeks_by_team):
         target_candidates[pid] = {"by_format": _finalize_player_index(by_format), "empty_reason": empty_reason}
 
     # ---- Trade-Ideen ----------------------------------------------------------
-    def _best_overall(predicate, idea_label, anlass_fn, limit=IDEA_LIMIT):
-        cands = [c for c in all_candidates if predicate(c)]
+    def _diverse_select(sorted_items, limit, max_per_anchor=MAX_IDEA_PER_ANCHOR, max_per_partner=MAX_IDEA_PER_PARTNER):
+        """Verhindert, dass eine Ideen-Kategorie von denselben 1-2 Abgabe-
+        Spielern oder demselben Partner-Team dominiert wird - sonst sehen
+        z.B. 'Spitze verbessern' und 'Breite aufbauen' nur wie geringfügige
+        Varianten desselben einen Trades aus, weil beide von denselben
+        wertvollsten Kadertrümpfen aus gebaut werden."""
+        seen_combo = set()
+        anchor_counts = {}
+        partner_counts = {}
         out = []
-        seen = set()
-        for c in sorted(cands, key=_score, reverse=True):
+        for c in sorted_items:
             key = _combo_key(c)
-            if key in seen:
+            if key in seen_combo:
                 continue
-            seen.add(key)
+            anchor = max(c["give_player_ids"], key=lambda pid: (players.get(pid) or {}).get("trade_value") or 0)
+            if anchor_counts.get(anchor, 0) >= max_per_anchor:
+                continue
+            if partner_counts.get(c["roster_id"], 0) >= max_per_partner:
+                continue
+            seen_combo.add(key)
+            anchor_counts[anchor] = anchor_counts.get(anchor, 0) + 1
+            partner_counts[c["roster_id"]] = partner_counts.get(c["roster_id"], 0) + 1
+            out.append(c)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _best_overall(predicate, idea_label, anlass_fn, limit=IDEA_LIMIT):
+        cands = sorted([c for c in all_candidates if predicate(c)], key=_score, reverse=True)
+        selected = _diverse_select(cands, limit)
+        out = []
+        for c in selected:
             item = _with_breakdown(dict(c), ctx_common)
             item["idea_label"] = idea_label
             item["anlass"] = anlass_fn(item)
             out.append(item)
-            if len(out) >= limit:
-                break
         return out
 
     def _idea_result(items, reason_if_none):
@@ -994,7 +1017,7 @@ def compute(data, rules, bye_weeks_by_team):
         best["idea_label"] = "Sell High"
         best["anlass"] = f"{players[pid]['name']}: {entry['ppo_ratio']}x Punkte pro Opportunity ggü. Positions-Schnitt ({entry['opportunity_pg']}/Spiel) - Touchdown-Glück-Risiko"
         sell_high_items.append(best)
-    sell_high_items = sorted(sell_high_items, key=_score, reverse=True)[:IDEA_LIMIT]
+    sell_high_items = _diverse_select(sorted(sell_high_items, key=_score, reverse=True), IDEA_LIMIT)
     ideas["sell_high"] = _idea_result(sell_high_items, "Keine eigenen Sell-High-Kandidaten mit passendem Gegenangebot gefunden.")
 
     buy_low_items = []
@@ -1017,7 +1040,7 @@ def compute(data, rules, bye_weeks_by_team):
         best["risk_level"] = INJURY_RISK_LABEL.get(status, "mittel")
         best["anlass"] = f"{p['name']}: {_injury_note(p)}"
         buy_low_items.append(best)
-    buy_low_items = sorted(buy_low_items, key=_score, reverse=True)[:IDEA_LIMIT]
+    buy_low_items = _diverse_select(sorted(buy_low_items, key=_score, reverse=True), IDEA_LIMIT)
     ideas["buy_low"] = _idea_result(buy_low_items, "Keine angeschlagenen Spieler mit kurzfristigem Status und hohem Restwert gefunden.")
 
     # Lücken je Team (Bye + Verletzung) für Notlage/Bye-Weeks
@@ -1086,7 +1109,7 @@ def compute(data, rules, bye_weeks_by_team):
                 best["anlass"] = f"{best['team_name']} hat Bye-Lücke auf {g['position']} in Woche {g['week']} ({g['player_name']})"
                 bye_items.append(best)
                 break
-    bye_items = sorted(_dedupe_sorted(bye_items), key=_score, reverse=True)[:IDEA_LIMIT]
+    bye_items = _diverse_select(sorted(_dedupe_sorted(bye_items), key=_score, reverse=True), IDEA_LIMIT)
     ideas["bye_weeks"] = _idea_result(bye_items, "Keine Bye-Wochen-Gelegenheit in den nächsten Wochen gefunden.")
 
     partner_notlage_items = []
@@ -1105,7 +1128,7 @@ def compute(data, rules, bye_weeks_by_team):
                 best["anlass"] = f"{best['team_name']}: {g['player_name']} ({cause_label}, Woche {g['week']}) - Bedarf {g['position']}, keine Bank-Alternative berechnet"
                 partner_notlage_items.append(best)
                 break
-    partner_notlage_items = sorted(_dedupe_sorted(partner_notlage_items), key=_score, reverse=True)[:IDEA_LIMIT]
+    partner_notlage_items = _diverse_select(sorted(_dedupe_sorted(partner_notlage_items), key=_score, reverse=True), IDEA_LIMIT)
     ideas["partner_notlage"] = _idea_result(partner_notlage_items, "Keine nachgewiesene Lineup-Lücke bei anderen Teams gefunden.")
 
     playoff_flags = _playoff_prep_flags(my_starter_ids, players, team_schedules, defense_ranks, playoff_weeks) if playoff_weeks else []
@@ -1122,7 +1145,7 @@ def compute(data, rules, bye_weeks_by_team):
         best["idea_label"] = "Playoff-Vorbereitung"
         best["anlass"] = f"{players[flag['player_id']]['name']}: {flag['detail']}"
         playoff_items.append(best)
-    playoff_items = sorted(_dedupe_sorted(playoff_items), key=_score, reverse=True)[:IDEA_LIMIT]
+    playoff_items = _diverse_select(sorted(_dedupe_sorted(playoff_items), key=_score, reverse=True), IDEA_LIMIT)
     playoff_empty_reason = (
         "Keine Playoff-Wochen in den Liga-Einstellungen gefunden." if not playoff_weeks else
         "Keine Starter mit Bye in Woche 13/14 oder zwei+ schweren Playoff-Matchups gefunden."
