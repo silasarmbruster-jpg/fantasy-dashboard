@@ -4,8 +4,10 @@ data.json-Modell, das das Frontend konsumiert."""
 import math
 from datetime import datetime, timezone
 
-from . import config, waiver
+from . import config, waiver, startsit
 from .scoring import score as score_stats
+
+MATCHUP_POSITIONS = ("QB", "RB", "WR", "TE", "K")
 
 TEAM_LOGO = "https://sleepercdn.com/images/team_logos/nfl/{team}.png"
 PLAYER_PHOTO = "https://sleepercdn.com/content/nfl/players/thumb/{pid}.jpg"
@@ -69,6 +71,60 @@ def _remaining_schedule(schedule, current_week, season_weeks=18):
     for team in rest:
         rest[team].sort(key=lambda g: g["week"])
     return rest
+
+
+def _team_opponent_by_week(schedule, season_weeks=18):
+    """team_abbr -> {week: opponent_abbr} für die gesamte Saison (vergangene
+    und zukünftige Wochen), abgeleitet aus dem NFL-Spielplan."""
+    opp_by_week = {}
+    for game in schedule:
+        wk = game.get("week")
+        if wk is None or wk < 1 or wk > season_weeks:
+            continue
+        home, away = game.get("home"), game.get("away")
+        if home and away:
+            opp_by_week.setdefault(home, {})[wk] = away
+            opp_by_week.setdefault(away, {})[wk] = home
+    return opp_by_week
+
+
+def _defense_vs_position(players, team_week_opponent):
+    """Für jedes NFL-Team: durchschnittlich zugelassene Fantasy-Punkte je
+    Position (Grundlage für den Matchup-Faktor im Start/Sit-Optimizer).
+    Berechnet aus den Fantasy-Punkten, die Spieler dieser Position in den
+    Wochen erzielt haben, in denen das jeweilige Team ihr Gegner war."""
+    sums = {}
+    for p in players.values():
+        pos = p["position"]
+        team = p["team"]
+        if pos not in MATCHUP_POSITIONS or not team:
+            continue
+        by_week = team_week_opponent.get(team, {})
+        for wk_str, pts in p["weekly_points"].items():
+            opp = by_week.get(int(wk_str))
+            if not opp:
+                continue
+            sums.setdefault(opp, {}).setdefault(pos, []).append(pts)
+
+    league_avg = {}
+    for pos in MATCHUP_POSITIONS:
+        vals = [v for by_pos in sums.values() for v in by_pos.get(pos, [])]
+        league_avg[pos] = sum(vals) / len(vals) if vals else 0.0
+
+    allowed = {team: {pos: sum(vals) / len(vals) for pos, vals in by_pos.items() if vals} for team, by_pos in sums.items()}
+    return allowed, league_avg
+
+
+def _matchup_factor(allowed, league_avg, opponent, position):
+    if position not in MATCHUP_POSITIONS or not opponent:
+        return 1.0
+    base = league_avg.get(position)
+    if not base:
+        return 1.0
+    value = (allowed.get(opponent) or {}).get(position)
+    if value is None:
+        return 1.0
+    return round(max(0.85, min(1.15, value / base)), 3)
 
 
 def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_proj,
@@ -194,6 +250,14 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             current_week, bye_weeks, trade_values, trending_add, trending_drop,
             rest_of_season,
         )
+
+    # --- Matchup-Stärke (für diese Woche) je Spieler ---
+    team_week_opponent = _team_opponent_by_week(schedule)
+    defense_allowed, defense_league_avg = _defense_vs_position(players, team_week_opponent)
+    for p in players.values():
+        opp = (team_week_opponent.get(p["team"]) or {}).get(current_week) if p["team"] else None
+        p["matchup_opponent"] = opp
+        p["matchup_factor"] = _matchup_factor(defense_allowed, defense_league_avg, opp, p["position"])
 
     # --- Teams / Standings ---
     teams = []
@@ -344,4 +408,5 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         "players": players,
     }
     data["waiver"] = waiver.compute(data)
+    data["start_sit"] = startsit.compute(data)
     return data
