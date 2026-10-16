@@ -1697,9 +1697,11 @@
     playoff_vorbereitung: "Playoff-Vorbereitung",
   };
 
+  // Fokus liegt auf Rest-of-Season-Wert, nicht auf "diese Woche" - muss mit
+  // der Server-Sortierung (fantasy/tradefinder.py::_score) übereinstimmen.
   function packageScore(c) {
     const rivalPenalty = c.is_playoff_rival ? 0.5 * Math.max(c.their_lineup_delta, 0) : 0;
-    return c.lineup_delta - rivalPenalty;
+    return (c.rest_of_season_proxy ?? c.lineup_delta) - rivalPenalty;
   }
 
   function candidateIndexFor(mode) {
@@ -1786,7 +1788,18 @@
         "div",
         { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;" },
         [
-          el("span", { class: "tab-pill", style: `background:${c.lineup_delta >= 0 ? "var(--status-good)" : "var(--status-bad)"};color:#fff;border:none;cursor:default;` }, `${c.lineup_delta >= 0 ? "+" : ""}${c.lineup_delta} Pkt. diese Woche`),
+          (() => {
+            // Fokus liegt auf Rest of Season, nicht auf "diese Woche" - das
+            // ist jetzt die große, farbige Haupt-Kennzahl. Präziser Wert
+            // (echte Wochen-für-Woche-Simulation) wenn vorhanden, sonst die
+            // schnelle Schätzung aus der Suche (rest_of_season_proxy).
+            const ros = c.value_delta_rest_of_season !== undefined ? c.value_delta_rest_of_season : c.rest_of_season_proxy;
+            const approx = c.value_delta_rest_of_season === undefined;
+            return el("span", { class: "tab-pill", style: `background:${ros >= 0 ? "var(--status-good)" : "var(--status-bad)"};color:#fff;border:none;cursor:default;` },
+              `${ros >= 0 ? "+" : ""}${ros} Pkt. Rest of Season${approx ? " (geschätzt)" : ""}`
+            );
+          })(),
+          el("span", { class: "tab-pill", style: "cursor:default;" }, `${c.lineup_delta >= 0 ? "+" : ""}${c.lineup_delta} Pkt. diese Woche`),
           c.value_delta_until_deadline !== undefined ? el("span", { class: "tab-pill", style: "cursor:default;" }, `Bis Deadline: ${c.value_delta_until_deadline >= 0 ? "+" : ""}${c.value_delta_until_deadline}`) : null,
           c.value_delta_playoffs !== undefined ? el("span", { class: "tab-pill", style: "cursor:default;" }, `Playoffs: ${c.value_delta_playoffs >= 0 ? "+" : ""}${c.value_delta_playoffs}`) : null,
           el("span", { class: "tab-pill", style: "cursor:default;" }, `Annahme: ${c.acceptance}`),
@@ -1928,15 +1941,14 @@
   }
 
   function buildPlayerPicker(mode) {
+    // WICHTIG: oninput darf NIE das globale render() aufrufen - das würde
+    // die komplette Seite neu aufbauen und damit auch den <input> durch
+    // einen neuen DOM-Knoten ersetzen, der den Eingabefokus verliert (Bug:
+    // nach jedem Buchstaben musste man erneut ins Feld klicken). Deshalb
+    // aktualisiert ein Tastendruck nur lokal die Ergebnisliste, nicht die
+    // ganze Seite - das Eingabefeld selbst bleibt derselbe DOM-Knoten.
     const wrap = el("div", { class: "card", style: "margin-bottom:14px;" });
-    const input = el("input", {
-      type: "text",
-      placeholder: mode === "give" ? "Eigenen Spieler suchen ..." : "Spieler suchen (alle Teams) ...",
-      value: tradeSearchView.pickerQuery,
-      style: "width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;",
-      oninput: (e) => { tradeSearchView.pickerQuery = e.target.value; render(); },
-    });
-    wrap.appendChild(input);
+    const resultsHost = el("div", { style: "margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:240px;overflow:auto;" });
 
     function candidatesPool() {
       if (mode === "give") {
@@ -1946,12 +1958,13 @@
       return Object.values(DATA.players).filter((p) => p.fantasy_team && p.fantasy_team.roster_id !== DATA.me.roster_id && TRADE_SEARCH_POSITIONS.includes(p.position));
     }
 
-    const q = tradeSearchView.pickerQuery.trim().toLowerCase();
-    if (q) {
+    function refreshResults() {
+      resultsHost.innerHTML = "";
+      const q = tradeSearchView.pickerQuery.trim().toLowerCase();
+      if (!q) return;
       const selected = mode === "give" ? tradeBlock.give : tradeBlock.target;
       const matches = candidatesPool().filter((p) => p.name.toLowerCase().includes(q) && !selected.includes(p.id)).slice(0, 8);
-      const resultsHost = el("div", { style: "margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:240px;overflow:auto;" });
-      if (!matches.length) resultsHost.appendChild(el("div", { class: "empty-state" }, "Keine Treffer."));
+      if (!matches.length) { resultsHost.appendChild(el("div", { class: "empty-state" }, "Keine Treffer.")); return; }
       matches.forEach((p) => {
         resultsHost.appendChild(
           el("button", {
@@ -1959,13 +1972,23 @@
             onclick: () => {
               setTradeBlockStatus(p.id, mode === "give" ? "give" : "target");
               tradeSearchView.pickerQuery = "";
-              render();
+              render(); // hier korrekt: eine Auswahl ändert den Seiteninhalt unterhalb
             },
           }, [playerTag(p.id)])
         );
       });
-      wrap.appendChild(resultsHost);
     }
+
+    const input = el("input", {
+      type: "text",
+      placeholder: mode === "give" ? "Eigenen Spieler suchen ..." : "Spieler suchen (alle Teams) ...",
+      value: tradeSearchView.pickerQuery,
+      style: "width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;",
+      oninput: (e) => { tradeSearchView.pickerQuery = e.target.value; refreshResults(); },
+    });
+    wrap.appendChild(input);
+    wrap.appendChild(resultsHost);
+    refreshResults();
     return wrap;
   }
 

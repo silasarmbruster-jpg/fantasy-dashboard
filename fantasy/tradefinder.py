@@ -146,11 +146,15 @@ def _week_lineup_points(player_ids, players, roster_positions, flex_positions, w
 
 
 def _value_breakdown(before_ids, after_ids, players, roster_positions, flex_positions,
-                      current_week, deadline_weeks, playoff_weeks):
+                      current_week, deadline_weeks, playoff_weeks, rest_of_season_weeks=None):
     """Wochen-für-Woche-Aufschlüsselung aus EINER Funktion - "diese Woche",
-    "Bis Deadline" und "Playoffs" können rechnerisch nie widersprüchlich
-    sein, weil sie reine Summen derselben Wochenwerte sind."""
-    all_weeks = sorted(set(deadline_weeks) | set(playoff_weeks))
+    "Bis Deadline", "Playoffs" und "Rest of Season" können rechnerisch nie
+    widersprüchlich sein, weil sie reine Summen derselben Wochenwerte sind.
+    `rest_of_season_weeks` deckt lückenlos alle verbleibenden Wochen ab
+    (auch die Wochen zwischen Trade-Deadline und Playoff-Start), das ist
+    die Haupt-Kennzahl für die Sortierung/Anzeige - nicht "diese Woche"."""
+    rest_of_season_weeks = rest_of_season_weeks or []
+    all_weeks = sorted(set(deadline_weeks) | set(playoff_weeks) | set(rest_of_season_weeks))
     weekly = []
     for w in all_weeks:
         before = _week_lineup_points(before_ids, players, roster_positions, flex_positions, w, current_week)
@@ -159,14 +163,38 @@ def _value_breakdown(before_ids, after_ids, players, roster_positions, flex_posi
     by_week = {e["week"]: e for e in weekly}
     until_deadline_total = round(sum(by_week[w]["delta"] for w in deadline_weeks if w in by_week), 2)
     playoffs_total = round(sum(by_week[w]["delta"] for w in playoff_weeks if w in by_week), 2)
+    rest_of_season_total = round(sum(by_week[w]["delta"] for w in rest_of_season_weeks if w in by_week), 2)
     this_week_delta = by_week[current_week]["delta"] if current_week in by_week else (weekly[0]["delta"] if weekly else 0.0)
     return {
         "weeks": weekly,
         "until_deadline_total": until_deadline_total,
         "playoffs_total": playoffs_total,
+        "rest_of_season_total": rest_of_season_total,
         "this_week_delta": this_week_delta,
         "short_term_negative_long_term_positive": this_week_delta < 0 and (until_deadline_total > 0 or playoffs_total > 0),
     }
+
+
+def _rest_of_season_player_value(p, num_weeks):
+    """Billige Schätzung (O(1), kein Lineup-Optimizer) ausschließlich fürs
+    Ranking während der Suche: Saison-Schnitt mal Usage-Trend mal
+    Verletzungs-Abschlag über die restlichen Wochen, Bye-Wochen grob über
+    den Anteil (num_weeks-1)/num_weeks genähert. Die PRÄZISE, wochengenaue
+    Rest-of-Season-Summe (inkl. exakter Bye-Behandlung und echtem
+    Lineup-Optimizer je Woche) steht separat in value_breakdown für die
+    final ausgewählten Pakete - dieser Proxy ist nur dafür da, tausende
+    Kandidaten ohne teure Wochen-für-Woche-Simulation nach Rest-of-Season-
+    Wert sortieren zu können."""
+    if num_weeks <= 0:
+        return 0.0
+    season_avg = p.get("season_avg") or 0.0
+    avg_last3 = p.get("avg_last3")
+    trend = 1.0
+    if avg_last3 is not None and season_avg:
+        trend = max(0.75, min(1.25, avg_last3 / season_avg))
+    injury = INJURY_VALUE_DISCOUNT.get(p.get("injury_status"), 1.0)
+    bye_factor = (num_weeks - 1) / num_weeks if num_weeks > 1 else 1.0
+    return season_avg * trend * injury * num_weeks * bye_factor
 
 
 def _bench_snapshot(ids, players, starter_ids):
@@ -535,6 +563,13 @@ def _evaluate_candidate(give_ids, get_ids, ctx, diff_pct_value):
     bench_before = _bench_snapshot(ctx["my_current_ids"], players, ctx["my_starter_ids"])
     bench_after = _bench_snapshot(my_after_ids, players, my_starters_after)
 
+    n_weeks = ctx["rest_of_season_week_count"]
+    rest_of_season_proxy = round(
+        sum(_rest_of_season_player_value(p, n_weeks) for p in get_combo)
+        - sum(_rest_of_season_player_value(p, n_weeks) for p in give_combo),
+        1,
+    )
+
     is_rival = False
     pr = ctx["playoff_results"].get(ctx["roster_id"])
     if pr is not None and ctx["playoff_teams"]:
@@ -547,6 +582,7 @@ def _evaluate_candidate(give_ids, get_ids, ctx, diff_pct_value):
         "give_value": round(give_value), "get_value": round(get_value),
         "value_diff_pct": diff_pct_value,
         "lineup_points_before": ctx["my_baseline_points"], "lineup_points_after": my_after_points, "lineup_delta": my_delta,
+        "rest_of_season_proxy": rest_of_season_proxy,
         "their_lineup_points_before": ctx["their_baseline_points"], "their_lineup_points_after": their_after_points,
         "their_lineup_delta": their_delta,
         "is_win_win": my_delta > 0 and their_delta > 0,
@@ -569,8 +605,12 @@ def _evaluate_candidate(give_ids, get_ids, ctx, diff_pct_value):
 
 
 def _score(c):
+    # Fokus liegt auf Rest-of-Season-Wert, nicht auf "diese Woche" - der
+    # billige Proxy (siehe _rest_of_season_player_value) steht schon auf
+    # jedem Kandidaten und erlaubt das Ranking ohne teure Wochen-für-Woche-
+    # Simulation für jeden einzelnen Kandidaten.
     rival_penalty = 0.5 * max(c["their_lineup_delta"], 0) if c["is_playoff_rival"] else 0
-    return c["lineup_delta"] - rival_penalty
+    return c["rest_of_season_proxy"] - rival_penalty
 
 
 def _combo_key(c):
@@ -586,11 +626,12 @@ def _with_breakdown(c, ctx_common):
     my_after_ids = [pid for pid in ctx_common["my_current_ids"] if pid not in give_ids] + list(get_ids)
     breakdown = _value_breakdown(
         ctx_common["my_current_ids"], my_after_ids, players, ctx_common["roster_positions"], ctx_common["flex_positions"],
-        ctx_common["current_week"], ctx_common["deadline_weeks"], ctx_common["playoff_weeks"],
+        ctx_common["current_week"], ctx_common["deadline_weeks"], ctx_common["playoff_weeks"], ctx_common["rest_of_season_weeks"],
     )
     c["value_breakdown"] = breakdown
     c["value_delta_until_deadline"] = breakdown["until_deadline_total"]
     c["value_delta_playoffs"] = breakdown["playoffs_total"]
+    c["value_delta_rest_of_season"] = breakdown["rest_of_season_total"]
     return c
 
 
@@ -641,6 +682,11 @@ def compute(data, rules, bye_weeks_by_team):
         bye_calendar_weeks = set(range(window_start, playoff_week_start))
     deadline_weeks = list(range(current_week, trade_deadline + 1))
     playoff_weeks = list(range(playoff_week_start, min((playoff_week_start or 14) + 4, 19))) if playoff_week_start else []
+    # Lückenlos alle verbleibenden Wochen (auch zwischen Trade-Deadline und
+    # Playoff-Start) aus dem echten Restprogramm - Grundlage für den
+    # Rest-of-Season-Fokus, nicht nur Deadline- und Playoff-Fenster.
+    rest_of_season_weeks = sorted({current_week} | {g["week"] for g in data["planner"]["remaining_schedule"]})
+    rest_of_season_week_count = len(rest_of_season_weeks)
 
     my_full_pool = _tradeable_pool(my_team, players)
     my_full_ids = [p["id"] for p in my_full_pool]
@@ -650,6 +696,7 @@ def compute(data, rules, bye_weeks_by_team):
     ctx_common = {
         "players": players, "roster_positions": roster_positions, "flex_positions": flex_positions,
         "current_week": current_week, "deadline_weeks": deadline_weeks, "playoff_weeks": playoff_weeks,
+        "rest_of_season_weeks": rest_of_season_weeks, "rest_of_season_week_count": rest_of_season_week_count,
         "my_current_ids": my_current_ids,
     }
 
@@ -907,29 +954,32 @@ def compute(data, rules, bye_weeks_by_team):
     def _spitze_anlass(c):
         return (
             f"{len(c['give_player_ids'])} Spieler für {len(c['get_player_ids'])}: "
-            f"+{c['lineup_delta']} Pkt./Woche Lineup-Gewinn, Tiefe sinkt von {c['bench_before']['bench_value']} "
-            f"auf {c['bench_after']['bench_value']} Bank-Punkte/Woche"
+            f"+{c['rest_of_season_proxy']} Pkt. Rest-of-Season-Gewinn (grobe Schätzung), Tiefe sinkt von "
+            f"{c['bench_before']['bench_value']} auf {c['bench_after']['bench_value']} Bank-Punkte/Woche"
         )
 
+    # Fokus liegt auf Rest-of-Season-Wert (rest_of_season_proxy), nicht auf
+    # "diese Woche" - ein Paket kann diese Woche neutral/negativ sein und
+    # trotzdem über den Rest der Saison klar positiv.
     spitze = _best_overall(
-        lambda c: c["label"] == "Spitze verbessern" and c["lineup_delta"] > 0,
+        lambda c: c["label"] == "Spitze verbessern" and c["rest_of_season_proxy"] > 0,
         "Spitze verbessern", _spitze_anlass,
     )
-    ideas["spitze_verbessern"] = _idea_result(spitze, "Keine Konsolidierungs-Pakete mit Lineup-Gewinn gefunden.")
+    ideas["spitze_verbessern"] = _idea_result(spitze, "Keine Konsolidierungs-Pakete mit Rest-of-Season-Gewinn gefunden.")
 
     def _breite_anlass(c):
         bench_gain = round(c["bench_after"]["bench_value"] - c["bench_before"]["bench_value"], 1)
         return (
             f"{len(c['give_player_ids'])} Spieler für {len(c['get_player_ids'])}: "
             f"Bank-Tiefe {'+' if bench_gain >= 0 else ''}{bench_gain} Pkt./Woche, "
-            f"Lineup {'+' if c['lineup_delta'] >= 0 else ''}{c['lineup_delta']} Pkt./Woche"
+            f"Rest of Season {'+' if c['rest_of_season_proxy'] >= 0 else ''}{c['rest_of_season_proxy']} Pkt."
         )
 
     breite = _best_overall(
-        lambda c: c["label"] == "Breite aufbauen" and (c["lineup_delta"] > 0 or c["bench_after"]["bench_value"] > c["bench_before"]["bench_value"]),
+        lambda c: c["label"] == "Breite aufbauen" and (c["rest_of_season_proxy"] > 0 or c["bench_after"]["bench_value"] > c["bench_before"]["bench_value"]),
         "Breite aufbauen", _breite_anlass,
     )
-    ideas["breite_aufbauen"] = _idea_result(breite, "Keine Aufteilungs-Pakete mit Tiefe- oder Lineup-Gewinn gefunden.")
+    ideas["breite_aufbauen"] = _idea_result(breite, "Keine Aufteilungs-Pakete mit Tiefe- oder Rest-of-Season-Gewinn gefunden.")
 
     sell_buy = data.get("sell_buy") or {"sell_high": [], "buy_low": []}
     sell_high_ids = {e["player_id"] for e in sell_buy.get("sell_high", []) if e.get("is_mine")}
