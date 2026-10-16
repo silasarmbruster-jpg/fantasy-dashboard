@@ -1,0 +1,3 @@
+# build.py nutzt aktuell nur die Python-Standardbibliothek (urllib, json).
+# Diese Datei existiert für künftige Phasen (z.B. nflverse-Fallback via pandas)
+# und damit der CI-Workflow immer "pip install -r requirements.txt" ausführen kann.
