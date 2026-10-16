@@ -3,15 +3,15 @@
   "use strict";
 
   const TABS = [
-    { id: "overview", label: "Übersicht", icon: "🏠", ready: true },
-    { id: "roster", label: "Mein Roster", icon: "👤", ready: true },
-    { id: "startsit", label: "Start/Sit", icon: "🔁", ready: true },
-    { id: "waiver", label: "Waiver Wire", icon: "📈", ready: true },
-    { id: "players", label: "Alle Spieler", icon: "📋", ready: true },
-    { id: "tradefinder", label: "Trade Finder", icon: "🔄", ready: true },
-    { id: "tradeanalyzer", label: "Trade-Analyzer", icon: "⚖️", ready: true },
-    { id: "league", label: "Liga", icon: "🏆", ready: false, phase: "Phase 5" },
-    { id: "planner", label: "Planer", icon: "🗓️", ready: false, phase: "Phase 5" },
+    { id: "overview", label: "Übersicht", icon: "🏠" },
+    { id: "roster", label: "Mein Roster", icon: "👤" },
+    { id: "startsit", label: "Start/Sit", icon: "🔁" },
+    { id: "waiver", label: "Waiver Wire", icon: "📈" },
+    { id: "players", label: "Alle Spieler", icon: "📋" },
+    { id: "tradefinder", label: "Trade Finder", icon: "🔄" },
+    { id: "tradeanalyzer", label: "Trade-Analyzer", icon: "⚖️" },
+    { id: "league", label: "Liga", icon: "🏆" },
+    { id: "planner", label: "Planer", icon: "🗓️" },
   ];
 
   const STATUS_LABELS = {
@@ -80,11 +80,6 @@
       root.appendChild(renderError("Daten konnten nicht geladen werden."));
       return;
     }
-    const tab = TABS.find((t) => t.id === tabId);
-    if (!tab.ready) {
-      root.appendChild(renderPlaceholder(tab));
-      return;
-    }
     if (tabId === "overview") root.appendChild(renderOverview());
     else if (tabId === "roster") root.appendChild(renderRoster());
     else if (tabId === "players") root.appendChild(renderPlayers());
@@ -92,6 +87,8 @@
     else if (tabId === "startsit") root.appendChild(renderStartSit());
     else if (tabId === "tradefinder") root.appendChild(renderTradeFinder());
     else if (tabId === "tradeanalyzer") root.appendChild(renderTradeAnalyzer());
+    else if (tabId === "league") root.appendChild(renderLeague());
+    else if (tabId === "planner") root.appendChild(renderPlanner());
   }
 
   function renderNav(activeId) {
@@ -122,14 +119,6 @@
     return el("div", { class: "card placeholder-card" }, [
       el("div", { class: "big-icon" }, "⚠️"),
       el("div", {}, msg),
-    ]);
-  }
-
-  function renderPlaceholder(tab) {
-    return el("div", { class: "card placeholder-card" }, [
-      el("div", { class: "big-icon" }, tab.icon),
-      el("div", { style: "font-weight:700;font-size:16px;margin-bottom:6px;" }, tab.label),
-      el("div", {}, `Kommt in ${tab.phase} des Dashboard-Ausbaus.`),
     ]);
   }
 
@@ -366,13 +355,6 @@
     return el("div", { class: "card" }, [
       el("div", { class: "card-title" }, ["Top Trade-Vorschläge", el("button", { class: "see-all", onclick: () => navigateTo("tradefinder") }, "Alle ansehen")]),
       body,
-    ]);
-  }
-
-  function renderComingSoonMiniCard(title, icon, tabId, phase) {
-    return el("div", { class: "card" }, [
-      el("div", { class: "card-title" }, [title, el("button", { class: "see-all", onclick: () => navigateTo(tabId) }, "Alle ansehen")]),
-      el("div", { class: "empty-state" }, `${icon} Verfügbar ab ${phase}.`),
     ]);
   }
 
@@ -970,6 +952,206 @@
       }
       frag.appendChild(card);
     });
+
+    return frag;
+  }
+
+  // ---------- Liga ----------
+  let selectedLeagueTeamId = null;
+
+  function playerLabel(pid) {
+    const p = DATA.players[pid];
+    if (p) return [posChip(p.position), " ", playerLink(pid)];
+    return [el("span", { style: "color:var(--text-faint);" }, pid)];
+  }
+
+  function renderLeague() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+
+    frag.appendChild(el("div", { class: "section-label" }, "Tabelle"));
+    const standingsRows = DATA.teams.map((t) =>
+      el("tr", {}, [
+        el("td", {}, `#${t.rank}`),
+        el("td", {}, t.team_name),
+        el("td", {}, `${t.wins}-${t.losses}${t.ties ? "-" + t.ties : ""}`),
+        el("td", {}, fmt1(t.fpts)),
+        el("td", {}, fmt1(t.fpts_against)),
+        el("td", {}, t.streak || "–"),
+      ])
+    );
+    frag.appendChild(
+      el("div", { class: "card table-wrap" }, [
+        el("table", { class: "data-table" }, [
+          el("thead", {}, el("tr", {}, [el("th", {}, "Rang"), el("th", {}, "Team"), el("th", {}, "W-L-T"), el("th", {}, "Punkte"), el("th", {}, "Gegen"), el("th", {}, "Serie")])),
+          el("tbody", {}, standingsRows),
+        ]),
+      ])
+    );
+
+    frag.appendChild(el("div", { class: "section-label" }, "Power-Ranking (nach Roster-Wert)"));
+    const prRows = DATA.league_feed.power_ranking.map((t) =>
+      el("tr", {}, [
+        el("td", {}, `#${t.power_rank}`),
+        el("td", {}, t.team_name),
+        el("td", {}, t.roster_value ? fmtInt(t.roster_value) : "–"),
+      ])
+    );
+    frag.appendChild(
+      el("div", { class: "card table-wrap" }, [
+        el("table", { class: "data-table" }, [
+          el("thead", {}, el("tr", {}, [el("th", {}, "Rang"), el("th", {}, "Team"), el("th", {}, "Roster-Wert")])),
+          el("tbody", {}, prRows),
+        ]),
+      ])
+    );
+
+    frag.appendChild(el("div", { class: "section-label" }, "Rosters"));
+    const teamPicker = el(
+      "div",
+      { style: "display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;" },
+      DATA.teams.map((t) =>
+        el(
+          "button",
+          {
+            class: "btn",
+            style: (selectedLeagueTeamId || DATA.me.roster_id) === t.roster_id ? "background:var(--accent);border-color:var(--accent);color:#fff;" : "",
+            onclick: () => {
+              selectedLeagueTeamId = t.roster_id;
+              render();
+            },
+          },
+          t.team_name
+        )
+      )
+    );
+    frag.appendChild(teamPicker);
+    frag.appendChild(renderTeamRosterCard(selectedLeagueTeamId || DATA.me.roster_id));
+
+    frag.appendChild(el("div", { class: "section-label" }, "Letzte Transaktionen"));
+    const txList = DATA.league_feed.transactions;
+    if (!txList.length) {
+      frag.appendChild(el("div", { class: "card empty-state" }, "Keine Transaktionen gefunden."));
+    } else {
+      frag.appendChild(
+        el(
+          "div",
+          { class: "card mini-list" },
+          txList.map((tx) => renderTransactionItem(tx))
+        )
+      );
+    }
+
+    return frag;
+  }
+
+  function renderTeamRosterCard(rosterId) {
+    const team = DATA.teams.find((t) => t.roster_id === rosterId);
+    if (!team) return el("div", { class: "empty-state" }, "Team nicht gefunden.");
+    const starterSet = new Set(team.starters || []);
+    const reserveSet = new Set(team.reserve || []);
+    const rows = (team.players || []).map((pid) => {
+      const p = DATA.players[pid];
+      if (!p) return null;
+      const role = starterSet.has(pid) ? "Starter" : reserveSet.has(pid) ? "Reserve" : "Bank";
+      const st = statusInfo(p);
+      return el("tr", {}, [
+        el("td", {}, [posChip(p.position), " ", playerLink(pid)]),
+        el("td", {}, p.team || "–"),
+        el("td", {}, role),
+        el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), " ", st.label]),
+        el("td", {}, fmt1(p.season_avg)),
+      ]);
+    }).filter(Boolean);
+    return el("div", { class: "card table-wrap" }, [
+      el("table", { class: "data-table" }, [
+        el("thead", {}, el("tr", {}, [el("th", {}, "Spieler"), el("th", {}, "Team"), el("th", {}, "Rolle"), el("th", {}, "Status"), el("th", {}, "Ø Saison")])),
+        el("tbody", {}, rows),
+      ]),
+    ]);
+  }
+
+  function renderTransactionItem(tx) {
+    const date = new Date(tx.created).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+    if (tx.type === "trade") {
+      return el("div", { class: "mini-item", style: "display:block;" }, [
+        el("div", { style: "font-size:11px;color:var(--text-faint);" }, `${date} · Trade`),
+        el(
+          "div",
+          { style: "display:flex;flex-wrap:wrap;gap:16px;margin-top:4px;" },
+          tx.participants.map((side) =>
+            el("div", {}, [
+              el("div", { style: "font-weight:700;font-size:12.5px;" }, side.team_name),
+              side.gets.length ? el("div", { style: "font-size:12px;" }, ["bekommt: ", ...side.gets.flatMap((pid, i) => [i > 0 ? ", " : "", ...playerLabel(pid)])]) : null,
+            ].filter(Boolean))
+          )
+        ),
+      ]);
+    }
+    const label = tx.type === "waiver" ? "Waiver" : "Free Agent";
+    return el("div", { class: "mini-item", style: "display:block;" }, [
+      el("div", { style: "font-size:11px;color:var(--text-faint);" }, `${date} · ${label} · ${tx.team_name}`),
+      el("div", { style: "font-size:12.5px;margin-top:2px;" }, [
+        tx.adds.length ? el("span", {}, ["+ ", ...tx.adds.flatMap((pid, i) => [i > 0 ? ", " : "", ...playerLabel(pid)])]) : null,
+        tx.adds.length && tx.drops.length ? el("span", { style: "margin:0 6px;" }, "·") : null,
+        tx.drops.length ? el("span", {}, ["− ", ...tx.drops.flatMap((pid, i) => [i > 0 ? ", " : "", ...playerLabel(pid)])]) : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  // ---------- Planer ----------
+  function renderPlanner() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+
+    frag.appendChild(el("div", { class: "section-label" }, "Restprogramm (Fantasy-Gegner)"));
+    const rest = DATA.planner.remaining_schedule;
+    if (!rest.length) {
+      frag.appendChild(el("div", { class: "card empty-state" }, "Kein Restprogramm verfügbar (Saisonende erreicht)."));
+    } else {
+      frag.appendChild(
+        el("div", { class: "card table-wrap" }, [
+          el("table", { class: "data-table" }, [
+            el("thead", {}, el("tr", {}, [el("th", {}, "Woche"), el("th", {}, "Gegner")])),
+            el(
+              "tbody",
+              {},
+              rest.map((g) =>
+                el("tr", { style: g.week === DATA.league.playoff_week_start ? "background:var(--accent-soft);" : "" }, [
+                  el("td", {}, `W${g.week}${g.week === DATA.league.playoff_week_start ? " (Playoffs)" : ""}`),
+                  el("td", {}, g.opponent_team_name || "–"),
+                ])
+              )
+            ),
+          ]),
+        ])
+      );
+    }
+
+    frag.appendChild(el("div", { class: "section-label" }, "Bye Weeks deines Kaders"));
+    const byeCalendar = DATA.planner.bye_calendar;
+    const weeks = Object.keys(byeCalendar).map(Number).sort((a, b) => a - b);
+    const upcoming = weeks.filter((w) => w >= DATA.league.week);
+    if (!upcoming.length) {
+      frag.appendChild(el("div", { class: "card empty-state" }, "Keine weiteren Bye Weeks in deinem Kader."));
+    } else {
+      frag.appendChild(
+        el(
+          "div",
+          { class: "grid grid-3" },
+          upcoming.map((wk) =>
+            el("div", { class: "card", style: "margin-bottom:0;" }, [
+              el("div", { style: "font-weight:800;font-size:14px;margin-bottom:8px;" }, `Woche ${wk}`),
+              el(
+                "div",
+                { style: "display:flex;flex-direction:column;gap:6px;" },
+                byeCalendar[String(wk)].map((pid) => el("div", {}, playerLabel(pid)))
+              ),
+            ])
+          )
+        )
+      );
+    }
 
     return frag;
   }
