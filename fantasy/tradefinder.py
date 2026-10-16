@@ -1,26 +1,29 @@
-"""Trade Finder v4: harte Sinn-Regeln gelten IMMER (werden nie gelockert),
-alles andere ist nur Information oder ein optionaler Frontend-Filter.
+"""Trade Finder v5: kompletter Neuaufbau um zwei Reiter herum.
 
-Architektur:
-  - Vorfilter + Beam-Search statt voller Kombinatorik: je Partner-Team werden
-    kleine Pakete (bis 2 Spieler je Seite) vollständig durchprobiert, größere
-    Pakete (bis zu PRACTICAL_MAX_SIDE je Seite - echte Unbegrenztheit ist
-    kombinatorisch sinnlos, siehe PR-Beschreibung) werden per Beam-Search aus
-    den besten kleinen Paketen heraus erweitert.
-  - Jeder Kandidat durchläuft dieselben harten Sinn-Regeln (Teil A), egal wie
-    groß das Paket ist oder wie "fair" der Marktwert aussieht.
-  - "Diese Woche", "Bis Deadline" und "Playoffs" kommen aus derselben
-    Wochen-für-Woche-Lineup-Funktion (_week_lineup_points) - keine zweite,
-    abweichende Formel mehr.
-  - Zusätzlich zur normalen Top-Liste wird JEDER handelbare Spieler (meiner
-    und jeder gegnerische) in einen Index aufgenommen (block_player_candidates
-    / target_offers), damit Trade-Block und Wunschspieler-Modus nie leer
-    bleiben - mit gezielter Nachsuche für Spieler, die es nicht in die
-    allgemeine Top-Liste geschafft haben.
+- "Spieler-Suche" (Modus A: eigenen Spieler abgeben / Modus B: Zielspieler
+  holen) - der Nutzer wählt Spieler, diese Datei liefert für JEDEN
+  handelbaren Spieler (meiner wie jeder gegnerische) einen Index aus
+  Paketen, gruppiert nach Format (Spielerzahl je Seite).
+- "Trade-Ideen" - die Seite sucht selbst, ohne Spielerwahl, nach
+  Gelegenheiten in 7 Kategorien (Spitze verbessern, Breite aufbauen,
+  Bye-Weeks, Buy Low, Partner-Notlage, Sell High, Playoff-Vorbereitung).
+
+Architektur (Performance): pro Partner-Team werden die wertvollsten Spieler
+beider Seiten (POOL_CAP) zu Paketen bis GIVE_MAX_SIDE (ich) bzw. GET_MAX_SIDE (ich bekomme) Spielern je Seite
+kombiniert. Die Wert-Fairness-Prüfung (billig, reine Arithmetik) läuft VOR
+der teuren Lineup-Prüfung (Beam-Search-Prinzip: nur wertmäßig passende
+Teilpakete werden überhaupt mit dem Lineup-Optimizer geprüft). Für einzelne,
+frei gewählte Spieler, die es nicht in den allgemeinen Pool schaffen, gibt es
+eine gezielte, günstige Nachsuche (anchored auf genau diesen Spieler).
+
+Alle Zahlen kommen aus echten Daten (Sleeper, FantasyCalc, ESPN - siehe
+build.py). Fehlende Daten (z.B. kein strukturierter Rückkehrtermin bei
+Verletzungen) werden nie erfunden, sondern offen als "unbekannt" markiert.
 """
 
 import itertools
 import time
+from collections import Counter
 
 from .roster_strength import weakness_matrix
 from .startsit import _best_lineup, HARD_OUT_STATUSES
@@ -28,70 +31,77 @@ from .startsit import _best_lineup, HARD_OUT_STATUSES
 TRADE_POSITIONS = ("QB", "RB", "WR", "TE")  # K/DEF sind nie Teil eines Trades
 SKILL_POSITIONS = ("RB", "WR", "TE")
 
-MIN_BENCH_DEPTH = 1
 NEAR_PLAYOFF_WINDOW = 2  # Wochen vor Playoff-Start, die für Bye-Absicherung zählen
-MAX_BENCH_COVER_PER_TRADE = 1  # höchstens 1 nicht-startender RB/WR mit benanntem Zweck je Trade
+MIN_BENCH_DEPTH = 1
 
-MY_KEY_PLAYER_COUNT = 5
-PRACTICAL_MAX_SIDE = 6  # "unbegrenzt" im UI heißt: bis zu dieser Paketgröße je Seite
-POOL_CAP = 11  # je Team nur die wertvollsten N Spieler fürs allgemeine Durchsuchen
-BEAM_WIDTH = 12
-TOPUP_OTHER_CAP = 7  # Kandidatenpool für die gezielte Nachsuche (Trade-Block/Ziel)
+GIVE_MAX_SIDE = 4  # "keine feste Obergrenze" heißt praktisch: bis 4 Spieler auf meiner Seite
+GET_MAX_SIDE = 3  # ... und bis 3 auf der Empfangsseite, siehe Formate in Teil 2 (nie 4) und PR-Beschreibung
+POOL_CAP = 9  # je Team nur die wertvollsten N Spieler für den allgemeinen Paar-Abgleich
+TOPUP_COMPANION_CAP = 6  # Begleitspieler-Pool für die gezielte Nachsuche eines einzelnen Spielers
 
-MAX_GIVE_PLAYER_APPEARANCES = 3  # ein eigener Spieler erscheint in höchstens 3 Top-Vorschlägen
-MAX_PROPOSALS_PER_TEAM = 6
-MAX_TOTAL_PROPOSALS = 120
-MIN_PROPOSALS_PER_PLAYER = 5
-TARGET_OFFER_TIER_COUNT = 3
+DEFAULT_FORMATS = [(1, 1), (2, 1), (3, 1), (1, 2), (2, 2), (3, 2)]
+EXTRA_FORMATS = [(4, 1), (4, 2), (1, 3), (2, 3), (3, 3), (4, 3)]
 
-PERFORMANCE_BUDGET_SECONDS = 45.0  # weicher Richtwert, kein Timeout - siehe _run_all_teams
+POWER = 1.5  # Potenz-Summe: Summe der Werte^1.5, damit zwei Mittelklasse-Spieler keinen Star aufwiegen
+REPLACEMENT_VALUE = 50  # fehlender Marktwert (null) wird als niedriges Ersatzniveau behandelt, nicht als 0
+GAIN_CAP = 0.10  # was ich bekomme, darf NIE mehr als 10% mehr Wert haben als das, was ich gebe - wird nie gelockert
+TOLERANCE_OPTIONS = [0.05, 0.10, 0.15, 0.20]
+DEFAULT_TOLERANCE = 0.10
+TOLERANCE_MAX = 0.20  # Lockerung ausschließlich zu meinen Lasten (ich überzahle), nie zugunsten eines Partner-Verlusts
+SUPERSTAR_CAP = 1.3
+TOP30_RANK = 30
+
+MIN_PACKAGES_PER_PLAYER = 2
+MIN_FORMATS_PER_PLAYER = 3
+MAX_PACKAGES_PER_FORMAT = 3  # Standardformate: pro Spieler/Format vorgehalten, Frontend zeigt 3-5 + "Mehr anzeigen"
+EXTRA_FORMAT_CAP = 2  # "Mehr Formate"-Formate: seltener angesehen, kleinerer Vorrat je Spieler
+TARGET_MIN_TRADE_VALUE = 150  # Zielspieler-Index nur für Spieler mit nennenswertem Marktwert (Datei-Größe)
+IDEA_LIMIT = 10
+
+PERFORMANCE_BUDGET_SECONDS = 45.0
 
 INJURY_VALUE_DISCOUNT = {
     "Out": 0.2, "Doubtful": 0.6, "Questionable": 0.9,
     "IR": 0.05, "PUP": 0.05, "Sus": 0.1, "NA": 0.05, "COV": 0.5,
 }
+SEASON_ENDING_STATUSES = {"IR", "PUP", "NA", "Sus", "COV"}  # werden nie als Buy-Low-Kauf vorgeschlagen
+SHORT_TERM_INJURY_STATUSES = {"Questionable", "Doubtful"}
+INJURY_RISK_LABEL = {"Questionable": "niedrig", "Doubtful": "mittel", "Out": "hoch"}
 
-RELAXATION_LABELS = {
-    1: "Strenge Prüfung",
-    2: "Erweitert: Fairness bis 25%",
-    3: "Erweitert: Fairness egal",
-    4: "Erweitert: Partner nur nach Marktwert",
-    5: "Erweitert: größere Pakete",
-    6: "Wertgewinn statt Lineup-Gewinn",
+STATUS_LABELS_DE = {
+    "Questionable": "fraglich", "Doubtful": "unwahrscheinlich im Einsatz", "Out": "out",
+    "IR": "verletzt (IR)", "PUP": "PUP", "Sus": "gesperrt", "NA": "nicht verfügbar", "COV": "Covid-Liste",
 }
 
 
 # ---------------------------------------------------------------------------
-# Grundbausteine: Pools, Wochen-Lineup, Bedarf
+# Grundbausteine
 # ---------------------------------------------------------------------------
 
-def _tradeable_pool(team, players, pool_cap=None, exclude_ids=None):
-    """Nur QB/RB/WR/TE mit bekanntem Marktwert, keine Reserve/IR-Spieler, nie
-    K/DEF - hartes Invariant (Regel A5), keine Heuristik."""
-    exclude_ids = exclude_ids or set()
+def _tradeable_pool(team, players, pool_cap=None):
+    """Nur QB/RB/WR/TE mit bekanntem Marktwert ODER fehlendem (= niedriges
+    Ersatzniveau, siehe REPLACEMENT_VALUE), keine Reserve/IR-Spieler, nie
+    K/DEF - hartes Invariant."""
     reserve = set(team.get("reserve") or [])
     pool = [
         players[pid] for pid in team["players"]
-        if pid in players and pid not in reserve and pid not in exclude_ids
+        if pid in players and pid not in reserve
         and players[pid]["position"] in TRADE_POSITIONS
-        and players[pid].get("trade_value")
     ]
-    pool.sort(key=lambda p: p["trade_value"], reverse=True)
+    pool.sort(key=lambda p: p.get("trade_value") or 0, reverse=True)
     return pool[:pool_cap] if pool_cap else pool
 
 
-def _need_fit(combo, weakness_for_team):
-    return round(sum(weakness_for_team.get(p["position"], 0) for p in combo), 2)
+def _player_value(p):
+    return p.get("trade_value") or REPLACEMENT_VALUE
 
 
 def _week_player_effective(p, week, current_week):
-    """Effektive Punktzahl eines Spielers für eine bestimmte Woche. Für die
-    aktuelle Woche: echte Projection, Hard-Out komplett raus (wie Start/Sit).
-    Für andere Wochen gibt es keine spielerspezifische Wochen-Projection in
-    den Daten - bester verfügbarer Schätzwert ist der Saison-Schnitt mit
-    Usage-Trend- und Verletzungs-Abschlag (gleiche Methodik wie der jeweils
-    aktuelle Status, nicht erfunden). Bye Week: Spieler fällt für diese Woche
-    komplett raus."""
+    """Effektive Punktzahl eines Spielers für eine bestimmte Woche - echte
+    Projection für die aktuelle Woche, für andere Wochen der beste
+    verfügbare Schätzwert (Saison-Schnitt mit Usage-Trend- und
+    Verletzungs-Abschlag, da keine spielerspezifische Wochen-Projection für
+    künftige Wochen in den Daten existiert). Bye Week: komplett raus."""
     if p.get("bye_week") == week:
         return None
     if week == current_week:
@@ -108,10 +118,6 @@ def _week_player_effective(p, week, current_week):
 
 
 def _week_lineup_analysis(player_ids, players, roster_positions, flex_positions, week, current_week):
-    """Baut für EINE Woche das optimale Lineup aus einer Spielerliste und
-    gibt (Starter-IDs, Spieler-nach-Position, Punktesumme) zurück. Einzige
-    Quelle für 'diese Woche', 'Bis Deadline' und 'Playoffs' - Konsistenz wird
-    dadurch erzwungen, nicht nur angestrebt."""
     pool = []
     for pid in player_ids:
         p = players.get(pid)
@@ -135,18 +141,15 @@ def _week_lineup_analysis(player_ids, players, roster_positions, flex_positions,
 
 
 def _week_lineup_points(player_ids, players, roster_positions, flex_positions, week, current_week):
-    _starters, _by_pos, points = _week_lineup_analysis(
-        player_ids, players, roster_positions, flex_positions, week, current_week,
-    )
+    _s, _b, points = _week_lineup_analysis(player_ids, players, roster_positions, flex_positions, week, current_week)
     return points
 
 
 def _value_breakdown(before_ids, after_ids, players, roster_positions, flex_positions,
                       current_week, deadline_weeks, playoff_weeks):
-    """Wochen-für-Woche-Aufschlüsselung über alle relevanten Wochen (Deadline-
-    Fenster + Playoff-Fenster), aus EINER Funktion. 'Diese Woche' ist einer
-    der Deadline-Wochen-Einträge, 'Bis Deadline' und 'Playoffs' sind reine
-    Summen derselben Werte - rechnerisch können sie nie widersprüchlich sein."""
+    """Wochen-für-Woche-Aufschlüsselung aus EINER Funktion - "diese Woche",
+    "Bis Deadline" und "Playoffs" können rechnerisch nie widersprüchlich
+    sein, weil sie reine Summen derselben Wochenwerte sind."""
     all_weeks = sorted(set(deadline_weeks) | set(playoff_weeks))
     weekly = []
     for w in all_weeks:
@@ -156,26 +159,97 @@ def _value_breakdown(before_ids, after_ids, players, roster_positions, flex_posi
     by_week = {e["week"]: e for e in weekly}
     until_deadline_total = round(sum(by_week[w]["delta"] for w in deadline_weeks if w in by_week), 2)
     playoffs_total = round(sum(by_week[w]["delta"] for w in playoff_weeks if w in by_week), 2)
-    this_week_delta = by_week[current_week]["delta"] if current_week in by_week else (
-        weekly[0]["delta"] if weekly else 0.0
-    )
-    short_term_negative_long_term_positive = this_week_delta < 0 and (until_deadline_total > 0 or playoffs_total > 0)
+    this_week_delta = by_week[current_week]["delta"] if current_week in by_week else (weekly[0]["delta"] if weekly else 0.0)
     return {
         "weeks": weekly,
         "until_deadline_total": until_deadline_total,
         "playoffs_total": playoffs_total,
         "this_week_delta": this_week_delta,
-        "short_term_negative_long_term_positive": short_term_negative_long_term_positive,
+        "short_term_negative_long_term_positive": this_week_delta < 0 and (until_deadline_total > 0 or playoffs_total > 0),
     }
 
 
+def _bench_snapshot(ids, players, starter_ids):
+    bench_ids = [pid for pid in ids if pid not in starter_ids]
+    bench_value = sum((players.get(pid) or {}).get("season_avg") or 0 for pid in bench_ids)
+    bye1314 = sum(1 for pid in bench_ids if (players.get(pid) or {}).get("bye_week") in (13, 14))
+    return {"bench_value": round(bench_value, 1), "bench_bye_13_14_count": bye1314, "bench_count": len(bench_ids)}
+
+
 # ---------------------------------------------------------------------------
-# Teil A: harte Sinn-Regeln (gelten auf jeder Stufe, werden nie gelockert)
+# Kombinationen vorberechnen (billig: nur Werte/Positionen, keine Lineups)
+# ---------------------------------------------------------------------------
+
+def _combo_record(combo_players, current_starter_ids=None):
+    ids = tuple(sorted(p["id"] for p in combo_players))
+    raw_values = [_player_value(p) for p in combo_players]
+    ranks = [p["trade_rank"] for p in combo_players if p.get("trade_rank")]
+    rec = {
+        "ids": ids,
+        "size": len(combo_players),
+        "power_sum": sum(v ** POWER for v in raw_values),
+        "raw_sum": sum(raw_values),
+        "max_value": max(raw_values),
+        "min_rank": min(ranks) if ranks else None,
+        "pos_counts": Counter(p["position"] for p in combo_players),
+    }
+    if current_starter_ids is not None:
+        rec["all_bench"] = not any(p["id"] in current_starter_ids for p in combo_players)
+    return rec
+
+
+def _precompute_combos(pool, max_size, current_starter_ids=None):
+    records = []
+    for size in range(1, max_size + 1):
+        if size > len(pool):
+            break
+        for combo in itertools.combinations(pool, size):
+            records.append(_combo_record(combo, current_starter_ids))
+    return records
+
+
+def _combos_anchored(anchor, companions, max_size):
+    """Gezielte Nachsuche: Kombinationen, die IMMER `anchor` enthalten, aus
+    `anchor` + 0..(max_size-1) Begleitspielern aus `companions`. Linear im
+    Aufwand statt kombinatorisch, weil der Anker feststeht."""
+    records = []
+    for n_companions in range(0, max_size):
+        if n_companions > len(companions):
+            break
+        for extra in itertools.combinations(companions, n_companions):
+            combo = [anchor] + list(extra)
+            records.append(_combo_record(combo))
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Wert-Regeln (Teil 4) - billige Vorprüfung vor jeder teuren Lineup-Prüfung
+# ---------------------------------------------------------------------------
+
+def _value_check(give_rec, get_rec, max_qb, max_te, tolerance=TOLERANCE_MAX):
+    denom = max(give_rec["power_sum"], get_rec["power_sum"], 1)
+    diff_pct = (get_rec["power_sum"] - give_rec["power_sum"]) / denom
+    if diff_pct > GAIN_CAP + 1e-9:
+        return None
+    if diff_pct < -tolerance - 1e-9:
+        return None
+    if get_rec["max_value"] > give_rec["max_value"] * SUPERSTAR_CAP + 1e-9:
+        return None
+    if give_rec.get("all_bench") and get_rec["min_rank"] is not None and get_rec["min_rank"] <= TOP30_RANK:
+        return None
+    if get_rec["pos_counts"].get("QB", 0) > max_qb:
+        return None
+    if get_rec["pos_counts"].get("TE", 0) > max_te:
+        return None
+    return round(diff_pct * 100, 1)
+
+
+# ---------------------------------------------------------------------------
+# Sinn-Regeln (Teil 5) - teure Prüfung, nur für Kandidaten, die die
+# Wert-Vorprüfung schon bestanden haben
 # ---------------------------------------------------------------------------
 
 def _lineup_legality(player_ids, players, rules):
-    """A3: nach dem Trade darf kein Pflicht-Slot leer sein, Mindesttiefe je
-    Skill-Position muss bleiben."""
     by_pos = {"QB": [], "RB": [], "WR": [], "TE": [], "K": [], "DEF": []}
     for pid in player_ids:
         p = players.get(pid)
@@ -192,9 +266,7 @@ def _lineup_legality(player_ids, players, rules):
         if counts.get(pos, 0) < need:
             return False, f"zu wenige {pos}-Spieler für die Pflicht-Slots"
 
-    remaining_flex_eligible = sum(
-        max(0, counts.get(pos, 0) - starter_counts.get(pos, 0)) for pos in flex_positions
-    )
+    remaining_flex_eligible = sum(max(0, counts.get(pos, 0) - starter_counts.get(pos, 0)) for pos in flex_positions)
     if remaining_flex_eligible < n_flex:
         return False, "nicht genug FLEX-fähige Spieler übrig"
 
@@ -206,183 +278,63 @@ def _lineup_legality(player_ids, players, rules):
     return True, None
 
 
-def _qb_te_rule_violation(get_combo, post_trade_starter_ids, rules):
-    """A1: ein Trade darf höchstens so viele QBs/TEs bringen, wie die Liga
-    Start-Slots dafür hat (in dieser 1-QB-Liga also genau 1 QB, 1 TE) - UND
-    jeder erhaltene QB/TE muss im optimalen Lineup nach dem Trade tatsächlich
-    starten. Kein Ausnahme-Pfad, anders als bei RB/WR-Bankspielern."""
-    max_qb = max(1, rules.get("num_qb_starters") or 1)
-    max_te = max(1, rules.get("starter_counts", {}).get("TE", 1) or 1)
-    get_qb = [p for p in get_combo if p["position"] == "QB"]
-    get_te = [p for p in get_combo if p["position"] == "TE"]
-    if len(get_qb) > max_qb:
-        return True, f"mehr als {max_qb} QB im selben Trade erhalten"
-    if len(get_te) > max_te:
-        return True, f"mehr als {max_te} TE im selben Trade erhalten"
-    for p in get_qb + get_te:
-        if p["id"] not in post_trade_starter_ids:
-            return True, f"{p['position']} {p.get('name')} würde nach dem Trade nicht starten"
-    return False, None
-
-
-def _bench_cover_violation(get_combo, post_trade_starter_ids, post_trade_by_pos, bye_calendar_weeks):
-    """A2: jeder erhaltene Spieler muss starten ODER einen benannten Zweck
-    haben (Bye-Absicherung Woche 13/14, Ersatz für verletzten Starter).
-    Bench-Cover nur für RB/WR, höchstens 1 Spieler pro Trade."""
-    bench_cover_used = 0
-    for p in get_combo:
-        if p["id"] in post_trade_starter_ids:
-            continue
-        if p["position"] not in ("RB", "WR"):
-            return True, f"{p['position']} {p.get('name')} startet nicht und hat keinen benannten Zweck"
-
-        starters_here = [s for s in post_trade_by_pos.get(p["position"], []) if s["id"] in post_trade_starter_ids]
-        injury_purpose = any(s.get("injury_status") in HARD_OUT_STATUSES for s in starters_here)
-
-        bye_purpose = False
-        for s in starters_here:
-            s_bye = s.get("bye_week")
-            if not s_bye or s_bye not in bye_calendar_weeks or p.get("bye_week") == s_bye:
-                continue
-            other_backup = [
-                b for b in post_trade_by_pos.get(p["position"], [])
-                if b["id"] not in (s["id"], p["id"]) and b.get("bye_week") != s_bye
-                and b.get("injury_status") not in HARD_OUT_STATUSES
-            ]
-            if not other_backup:
-                bye_purpose = True
-                break
-
-        if not (injury_purpose or bye_purpose):
-            return True, f"{p['position']} {p.get('name')} ist unbegründete Bank-Reserve"
-        bench_cover_used += 1
-        if bench_cover_used > MAX_BENCH_COVER_PER_TRADE:
-            return True, "mehr als 1 unbegründeter Bank-Cover-Spieler im selben Trade"
-    return False, None
-
-
 def _must_drop_info(ids, total_roster_slots, players, waiver_by_position):
-    """A4: Roster-Limit nach dem Trade. Bei Überlauf: wer müsste gedroppt
-    werden (günstigste Spieler nach Marktwert zuerst), und lässt sich der
-    frei werdende Slot mit einem Waiver-Pickup auf derselben Position
-    füllen?"""
     overflow = len(ids) - total_roster_slots
     if overflow <= 0:
         return False, [], True
     droppable = sorted(ids, key=lambda pid: (players.get(pid) or {}).get("trade_value") or 0)
     drop_ids = droppable[:overflow]
-    can_fill = all(
-        bool(waiver_by_position.get((players.get(pid) or {}).get("position")))
-        for pid in drop_ids
-    )
+    can_fill = all(bool(waiver_by_position.get((players.get(pid) or {}).get("position"))) for pid in drop_ids)
     return True, drop_ids, can_fill
 
 
-def _evaluate_state(give_ids, get_ids, ctx):
-    """Prüft ALLE harten Sinn-Regeln (Teil A) für beide Seiten und liefert,
-    falls der Trade zulässig ist, die vollständigen Metriken (aktuelle Woche)
-    für Beam-Scoring und Anzeige. None = Trade verletzt eine harte Regel und
-    wird nie angezeigt, egal auf welcher Lockerungsstufe."""
-    players = ctx["players"]
-    give_combo = [players[i] for i in give_ids]
-    get_combo = [players[i] for i in get_ids]
+def _qb_te_must_start(get_ids, starter_ids, players):
+    for pid in get_ids:
+        p = players.get(pid)
+        if p and p["position"] in ("QB", "TE") and pid not in starter_ids:
+            return False
+    return True
 
-    v1 = sum(p["trade_value"] for p in give_combo)
-    v2 = sum(p["trade_value"] for p in get_combo)
-    diff_pct = abs(v1 - v2) / max(v1, v2, 1)
 
-    my_after_ids = [pid for pid in ctx["my_current_ids"] if pid not in give_ids] + list(get_ids)
-    their_after_ids = [pid for pid in ctx["their_keep_ids"] if pid not in get_ids] + list(give_ids)
-
-    my_starters, my_by_pos, my_after_points = _week_lineup_analysis(
-        my_after_ids, players, ctx["roster_positions"], ctx["flex_positions"], ctx["current_week"], ctx["current_week"],
-    )
-    violated, _ = _qb_te_rule_violation(get_combo, my_starters, ctx["rules"])
-    if violated:
+def _named_purpose(p, starter_ids, my_starters_by_pos, bye_calendar_weeks):
+    if p["id"] in starter_ids:
         return None
-    violated, _ = _bench_cover_violation(get_combo, my_starters, my_by_pos, ctx["bye_calendar_weeks"])
-    if violated:
-        return None
+    starters_here = my_starters_by_pos.get(p["position"], [])
+    if any(s.get("injury_status") in HARD_OUT_STATUSES for s in starters_here):
+        return "Verletzungs-Ersatz"
+    for s in starters_here:
+        s_bye = s.get("bye_week")
+        if s_bye and s_bye in bye_calendar_weeks and p.get("bye_week") != s_bye:
+            return "Bye-Absicherung vor Playoffs"
+    return "Flex-Tiefe"
 
-    their_starters, their_by_pos, their_after_points = _week_lineup_analysis(
-        their_after_ids, players, ctx["roster_positions"], ctx["flex_positions"], ctx["current_week"], ctx["current_week"],
-    )
-    # A1/A2 ("muss starten oder benannten Zweck haben") gelten für das, was
-    # ICH bekomme - das schützt mein Roster vor nutzlosen Spielern. Für den
-    # Partner wäre dieselbe Regel unrealistisch: echte Trades enthalten fast
-    # immer Füllspieler, die beim Partner nicht sofort starten. Für ihn
-    # gelten weiterhin die strukturellen Regeln (kein leerer Slot, Roster-
-    # Limit, siehe unten) sowie Lineup-Gewinn/Bedarf als Information.
-    legal, _ = _lineup_legality(my_after_ids, players, ctx["rules"])
-    must_drop_mine, drop_ids_mine, can_fill_mine = _must_drop_info(
-        my_after_ids, ctx["total_roster_slots"], players, ctx["my_waiver_by_pos"],
-    )
-    if not legal and not must_drop_mine:
-        return None
 
-    their_legal, _ = _lineup_legality(their_after_ids, players, ctx["rules"])
-    must_drop_theirs, drop_ids_theirs, can_fill_theirs = _must_drop_info(
-        their_after_ids, ctx["total_roster_slots"], players, ctx["their_waiver_by_pos"],
-    )
-    if not their_legal and not must_drop_theirs:
-        return None
-
-    my_delta = round(my_after_points - ctx["my_baseline_points"], 2)
-    their_delta = round(their_after_points - ctx["their_baseline_points"], 2)
-
-    my_need_fit = _need_fit(get_combo, ctx["my_weakness"])
-    their_need_fit = _need_fit(give_combo, ctx["their_weakness"])
-
-    beam_score = my_delta * 2 + max(their_delta, 0) + my_need_fit * 1.5 + their_need_fit - diff_pct * 3
-
-    return {
-        "give_player_ids": sorted(give_ids),
-        "get_player_ids": sorted(get_ids),
-        "give_value": v1,
-        "get_value": v2,
-        "value_diff_pct": round(diff_pct * 100, 1),
-        "value_diff_pct_signed": round((v1 - v2) / max(v1, v2, 1) * 100, 1),
-        "lineup_points_before": ctx["my_baseline_points"],
-        "lineup_points_after": my_after_points,
-        "lineup_delta": my_delta,
-        "their_lineup_points_before": ctx["their_baseline_points"],
-        "their_lineup_points_after": their_after_points,
-        "their_lineup_delta": their_delta,
-        "is_win_win": my_delta > 0 and their_delta > 0,
-        "roster_legal_for_me": legal,
-        "must_drop_players": must_drop_mine,
-        "my_drop_candidate_ids": drop_ids_mine,
-        "can_fill_via_waiver_mine": can_fill_mine,
-        "their_roster_legal": their_legal,
-        "their_must_drop_players": must_drop_theirs,
-        "their_drop_candidate_ids": drop_ids_theirs,
-        "can_fill_via_waiver_theirs": can_fill_theirs,
-        "my_need_fit": my_need_fit,
-        "their_need_fit": their_need_fit,
-        "_beam_score": beam_score,
-    }
+def _package_label(give_size, get_size):
+    if give_size > get_size:
+        return "Spitze verbessern"
+    if give_size < get_size:
+        return "Breite aufbauen"
+    return "Gleichwertiger Tausch"
 
 
 # ---------------------------------------------------------------------------
-# Teil C.3: Annahme-Wahrscheinlichkeit (vorzeichenrichtig aus Partnersicht)
+# Annahme-Wahrscheinlichkeit (vorzeichenrichtig aus Partnersicht)
 # ---------------------------------------------------------------------------
 
-def _acceptance_label(give_value, get_value, their_lineup_delta, their_need_fit, partner_type):
-    """give_value = Wert, den ICH abgebe (= der Partner EMPFÄNGT).
-    get_value = Wert, den ich bekomme (= der Partner ABGIBT).
-    partner_loss_pct > 0 heißt: der Partner gibt mehr Marktwert ab, als er
-    bekommt - das darf NIE als 'hoch' erscheinen, egal was Need/Partnertyp
-    sagen."""
+def _acceptance_label(give_value, get_value, their_lineup_delta, their_need_fit, partner_type, boost=False):
+    """give_value = was ICH abgebe (= Partner empfängt), get_value = was ich
+    bekomme (= Partner abgibt). partner_loss_pct > 0 heißt: Partner gibt
+    mehr ab, als er bekommt. `boost`: z.B. bei Bye-Woche-Ausnutzung darf die
+    Annahme höher ausfallen, wenn der Partner kurzfristig einen Ersatz
+    braucht - die Wert-Obergrenze (max. 10% Verlust, siehe GAIN_CAP) gilt
+    trotzdem immer."""
     denom = max(give_value, get_value, 1)
     partner_loss_pct = (get_value - give_value) / denom
-
     if partner_loss_pct > 0.15:
         return "niedrig"
     if partner_loss_pct > 0.05:
-        return "mittel"
-
-    # Partner verliert höchstens 5% oder gewinnt sogar Marktwert (ich überzahle).
-    if their_need_fit >= 2 or their_lineup_delta > 0 or partner_type == "buyer":
+        return "mittel" if not boost else "hoch"
+    if their_need_fit >= 2 or their_lineup_delta > 0 or partner_type == "buyer" or boost:
         return "hoch"
     if partner_type == "seller" and their_lineup_delta <= 0 and their_need_fit <= 0:
         return "mittel"
@@ -402,99 +354,18 @@ def _partner_type(their_rank, num_teams, playoff_teams, scouting):
     return "passive"
 
 
-def _age_stance(give_combo, get_combo, is_dynasty):
-    def avg_age(combo):
-        ages = [p["age"] for p in combo if p.get("age")]
-        return sum(ages) / len(ages) if ages else None
-
-    give_age, get_age = avg_age(give_combo), avg_age(get_combo)
-    if give_age is None or get_age is None:
-        return None
-    if get_age > give_age + 1:
-        return "Win-Now"
-    if get_age < give_age - 1:
-        return "Langfristig" if is_dynasty else None
-    return "neutral"
+def _need_fit(combo_ids, players, weakness_for_team):
+    return round(sum(weakness_for_team.get((players.get(pid) or {}).get("position"), 0) for pid in combo_ids), 2)
 
 
-# ---------------------------------------------------------------------------
-# Zweck-Labels (ohne mindestens eines wird ein Vorschlag nie angezeigt)
-# ---------------------------------------------------------------------------
-
-def _purpose_labels(give_combo, get_combo, their_weakness, lineup_delta,
-                     my_starters_by_pos, my_roster_by_pos, bye_calendar_weeks, sell_high_ids,
-                     buy_low_ids, their_need_fit, relaxation_level):
-    labels = []
-    give_ids = {p["id"] for p in give_combo}
-    get_ids = {p["id"] for p in get_combo}
-
-    if lineup_delta >= 1.5:
-        upgraded_positions = sorted({p["position"] for p in get_combo})
-        labels.append(f"Upgrade {'/'.join(upgraded_positions)}")
-
-    for p in get_combo:
-        starters_here = my_starters_by_pos.get(p["position"], [])
-        if any(s.get("injury_status") in HARD_OUT_STATUSES for s in starters_here):
-            labels.append("Loch füllen (Verletzungs-Ersatz)")
-            break
-
-    for p in get_combo:
-        for s in my_starters_by_pos.get(p["position"], []):
-            s_bye = s.get("bye_week")
-            if not s_bye or s_bye not in bye_calendar_weeks or p.get("bye_week") == s_bye:
-                continue
-            has_other_backup = any(
-                b["id"] not in give_ids and b["id"] != s["id"] and b.get("bye_week") != s_bye
-                and b.get("injury_status") not in HARD_OUT_STATUSES
-                for b in my_roster_by_pos.get(p["position"], [])
-            )
-            if not has_other_backup:
-                labels.append("Bye-Absicherung vor Playoffs")
-                break
-        if "Bye-Absicherung vor Playoffs" in labels:
-            break
-
-    if len(give_combo) > len(get_combo) and lineup_delta > 0:
-        labels.append("Konsolidierung")
-    if len(give_combo) < len(get_combo) and lineup_delta > 0:
-        labels.append("Tiefe aufbauen")
-    if give_ids & sell_high_ids:
-        labels.append("Sell High")
-    if get_ids & buy_low_ids:
-        labels.append("Buy Low")
-    if their_need_fit >= 3:
-        labels.append("Gegner-Schwäche nutzen")
-    if relaxation_level >= 6:
-        labels.append("Wertgewinn statt Lineup-Gewinn")
-
-    seen = set()
-    out = []
-    for l in labels:
-        if l not in seen:
-            seen.add(l)
-            out.append(l)
-    return out
-
-
-def _reasons(give_combo, get_combo, their_need_fit, my_need_fit, diff_pct):
+def _partner_accept_reasons(their_need_fit, their_lineup_delta, partner_type, acceptance, boost_reason=None):
     reasons = []
-    if my_need_fit > 0:
-        positions = sorted({p["position"] for p in get_combo})
-        reasons.append(f"Verstärkt deinen Bedarf auf {', '.join(positions)}")
-    if their_need_fit > 0:
-        positions = sorted({p["position"] for p in give_combo})
-        reasons.append(f"Trifft den Bedarf des anderen Teams auf {', '.join(positions)}")
-    reasons.append(f"Wertdifferenz {round(diff_pct * 100, 1)}%")
-    return reasons
-
-
-def _partner_accept_reasons(give_combo, their_need_fit, their_lineup_delta, partner_type, acceptance):
-    reasons = []
+    if boost_reason:
+        reasons.append(boost_reason)
     if their_lineup_delta > 0:
         reasons.append(f"Verbessert sein eigenes Lineup um {their_lineup_delta} Pkt./Woche")
     if their_need_fit > 0:
-        positions = sorted({p["position"] for p in give_combo})
-        reasons.append(f"Füllt seinen Bedarf auf {', '.join(positions)}")
+        reasons.append("Trifft einen Bedarf seines Teams")
     if partner_type == "buyer":
         reasons.append("Team im Playoff-Rennen - eher bereit, für sofortige Verbesserung zu handeln")
     elif partner_type == "seller":
@@ -509,129 +380,218 @@ def _league_rules_note(rules, is_dynasty, num_teams):
     qb_label = "SUPER_FLEX" if rules.get("super_flex") else f"{rules.get('num_qb_starters', 1)} Start-QB"
     return (
         f"Liga-Regeln berücksichtigt: {league_type_label}, {qb_label}, {num_teams} Teams. "
-        "K/DEF sind nie Teil eines Trades. Jeder erhaltene QB/TE muss nach dem Trade "
-        "tatsächlich starten, jeder andere erhaltene Spieler startet oder hat einen "
-        "benannten Zweck (Bye-Absicherung, Verletzungs-Ersatz). Roster-Pflicht-Slots und "
-        "Mindesttiefe je Skill-Position bleiben erhalten - sonst wird der Vorschlag verworfen."
+        "Paketwerte werden als Potenz-Summe (Wert^1.5) verglichen, damit mehrere Mittelklasse-Spieler "
+        "keinen Star aufwiegen. K/DEF sind nie Teil eines Trades, Roster-Pflicht-Slots und Mindesttiefe "
+        "bleiben erhalten - sonst wird das Paket verworfen."
     )
 
 
-# ---------------------------------------------------------------------------
-# Relaxation-Stufe: jeder Kandidat bekommt EINE objektive Stufe zugewiesen,
-# statt sequenziell immer lockerer zu suchen. Das ist deterministisch,
-# schneller (ein Suchlauf statt bis zu 6) und ergibt dasselbe Ergebnis: die
-# Sinn-Regeln aus Teil A gelten für jede Stufe gleich (bereits in
-# _evaluate_state durchgesetzt, nie hier gelockert).
-# ---------------------------------------------------------------------------
-
-def _relaxation_level(diff_pct_0to1, my_delta, their_delta, side_size):
-    if my_delta <= 0:
-        return 6
-    if their_delta > 0:
-        if diff_pct_0to1 <= 0.15:
-            return 1
-        if diff_pct_0to1 <= 0.25:
-            return 2
-        return 3
-    if side_size >= 4:
-        return 5
-    return 4
-
-
-# ---------------------------------------------------------------------------
-# Beam-Search je Team-Paar
-# ---------------------------------------------------------------------------
-
-def _generate_team_pair_states(my_ids_pool, their_ids_pool, ctx, perf):
-    """Kleine Pakete (bis 2 je Seite) vollständig, größere Pakete (bis
-    PRACTICAL_MAX_SIDE) per Beam-Search aus den besten kleinen Paketen
-    heraus erweitert. Gibt alle gültigen (Sinn-Regel-konformen) Zustände
-    zurück, mit Rohmetriken (Marktwert, diese-Woche-Delta, Need-Fit)."""
-    cache = {}
-
-    def add_state(give_ids, get_ids):
-        key = (tuple(sorted(give_ids)), tuple(sorted(get_ids)))
-        if key in cache:
-            return cache[key]
-        perf["evals"] += 1
-        m = _evaluate_state(set(give_ids), set(get_ids), ctx)
-        cache[key] = m
-        return m
-
-    seeds = []
-    for gsize, ssize in ((1, 1), (1, 2), (2, 1), (2, 2)):
-        if gsize > len(my_ids_pool) or ssize > len(their_ids_pool):
-            continue
-        for g in itertools.combinations(my_ids_pool, gsize):
-            for s in itertools.combinations(their_ids_pool, ssize):
-                m = add_state(g, s)
-                if m:
-                    seeds.append(m)
-
-    seeds.sort(key=lambda m: m["_beam_score"], reverse=True)
-    beam = seeds[:BEAM_WIDTH]
-    for _depth in range(PRACTICAL_MAX_SIDE - 2):
-        next_beam = []
-        for state in beam:
-            give_ids = set(state["give_player_ids"])
-            get_ids = set(state["get_player_ids"])
-            if len(give_ids) < PRACTICAL_MAX_SIDE:
-                for pid in my_ids_pool:
-                    if pid in give_ids:
-                        continue
-                    m = add_state(give_ids | {pid}, get_ids)
-                    if m:
-                        next_beam.append(m)
-            if len(get_ids) < PRACTICAL_MAX_SIDE:
-                for pid in their_ids_pool:
-                    if pid in get_ids:
-                        continue
-                    m = add_state(give_ids, get_ids | {pid})
-                    if m:
-                        next_beam.append(m)
-        if not next_beam:
-            break
-        next_beam.sort(key=lambda m: m["_beam_score"], reverse=True)
-        beam = next_beam[:BEAM_WIDTH]
-        seeds.extend(beam)
-
-    return [m for m in cache.values() if m]
-
-
-def _topup_states_for_player(pid, side, my_ids_pool_full, their_ids_pool_full, ctx, perf, extra_cap=TOPUP_OTHER_CAP):
-    """Gezielte Nachsuche für EINEN Spieler, der es nicht in den allgemeinen
-    Pool (Top-POOL_CAP je Team) geschafft hat: fixiert `pid` auf der
-    angegebenen Seite und probiert ihn solo sowie mit je einem der
-    relevantesten anderen Spieler - linear im Aufwand, nicht kombinatorisch,
-    weil pid fest steht."""
-    results = []
-    if side == "give":
-        others = [pid2 for pid2 in my_ids_pool_full if pid2 != pid][:extra_cap]
-        combos = [(pid,)] + [(pid, o) for o in others]
-        their_candidates = their_ids_pool_full[:extra_cap]
-        for g in combos:
-            for s_size in (1, 2):
-                for s in itertools.combinations(their_candidates, min(s_size, len(their_candidates))):
-                    if not s:
-                        continue
-                    perf["evals"] += 1
-                    m = _evaluate_state(set(g), set(s), ctx)
-                    if m:
-                        results.append(m)
+def _injury_note(p):
+    status = p.get("injury_status")
+    if not status:
+        return None
+    label = STATUS_LABELS_DE.get(status, status)
+    body = f" ({p['injury_body_part']})" if p.get("injury_body_part") else ""
+    if p.get("practice_description"):
+        practice = f" · Training: {p['practice_description']}"
     else:
-        others = [pid2 for pid2 in their_ids_pool_full if pid2 != pid][:extra_cap]
-        combos = [(pid,)] + [(pid, o) for o in others]
-        my_candidates = my_ids_pool_full[:extra_cap]
-        for s in combos:
-            for g_size in (1, 2):
-                for g in itertools.combinations(my_candidates, min(g_size, len(my_candidates))):
-                    if not g:
-                        continue
-                    perf["evals"] += 1
-                    m = _evaluate_state(set(g), set(s), ctx)
-                    if m:
-                        results.append(m)
-    return results
+        practice = " · Trainingsstatus unbekannt"
+    return_note = " · Rückkehrtermin unbekannt (keine strukturierte Angabe in den Daten)"
+    return f"{label}{body}{practice}{return_note}"
+
+
+# ---------------------------------------------------------------------------
+# Lineup-Lücken durch Bye/Verletzung (Datengrundlage für Bye-Weeks,
+# Notlage-des-Partners und Playoff-Vorbereitung) - rein aus echten Feldern
+# (bye_week, injury_status) und der aktuellen Roster-Zusammensetzung,
+# nichts wird für künftige Wochen vorhergesagt oder erfunden.
+# ---------------------------------------------------------------------------
+
+def _team_lineup_gaps(roster_ids, starter_ids, players, current_week, weeks_ahead=4):
+    weeks = list(range(current_week, current_week + weeks_ahead))
+    by_pos_roster = {}
+    for pid in roster_ids:
+        p = players.get(pid)
+        if p:
+            by_pos_roster.setdefault(p["position"], []).append(p)
+    gaps = []
+    for w in weeks:
+        for pid in starter_ids:
+            p = players.get(pid)
+            if not p:
+                continue
+            is_bye = p.get("bye_week") == w
+            is_injured = w == current_week and p.get("injury_status") in HARD_OUT_STATUSES
+            if not (is_bye or is_injured):
+                continue
+            same_pos = by_pos_roster.get(p["position"], [])
+            replacement = next(
+                (r for r in same_pos if r["id"] != pid and r.get("bye_week") != w
+                 and not (w == current_week and r.get("injury_status") in HARD_OUT_STATUSES)),
+                None,
+            )
+            if replacement is None:
+                gaps.append({
+                    "week": w, "position": p["position"], "player_id": pid, "player_name": p.get("name"),
+                    "cause": "bye" if is_bye else "injury",
+                    "magnitude": round(p.get("season_avg") or 0, 1),
+                })
+    return gaps
+
+
+def _playoff_prep_flags(starter_ids, players, team_schedules, defense_ranks, playoff_weeks):
+    flags = []
+    for pid in starter_ids:
+        p = players.get(pid)
+        if not p or p["position"] not in SKILL_POSITIONS + ("QB",):
+            continue
+        if p.get("bye_week") in (13, 14):
+            flags.append({
+                "player_id": pid, "position": p["position"], "reason": "bye",
+                "detail": f"Bye in Woche {p['bye_week']} (während der Playoffs)",
+            })
+            continue
+        team = p.get("team")
+        schedule = team_schedules.get(team) or []
+        hard_weeks = []
+        for g in schedule:
+            wk = g.get("week")
+            if wk not in playoff_weeks:
+                continue
+            opp = g.get("opponent")
+            rank = (defense_ranks.get(p["position"]) or {}).get(opp)
+            rank_of = len(defense_ranks.get(p["position"]) or {}) or 32
+            if rank is not None and rank <= max(10, round(rank_of / 3)):
+                hard_weeks.append((wk, opp, rank, rank_of))
+        if len(hard_weeks) >= 2:
+            detail = "; ".join(f"Woche {wk} gegen {opp} (Rang {rank}/{of} gegen {p['position']})" for wk, opp, rank, of in hard_weeks)
+            flags.append({"player_id": pid, "position": p["position"], "reason": "matchups", "detail": detail, "hard_weeks": hard_weeks})
+    return flags
+
+
+# ---------------------------------------------------------------------------
+# Teure Kandidaten-Prüfung (nur für Wert-Vorprüfung-Überlebende)
+# ---------------------------------------------------------------------------
+
+def _evaluate_candidate(give_ids, get_ids, ctx, diff_pct_value):
+    players = ctx["players"]
+    give_combo = [players[i] for i in give_ids]
+    get_combo = [players[i] for i in get_ids]
+
+    my_after_ids = [pid for pid in ctx["my_current_ids"] if pid not in give_ids] + list(get_ids)
+    their_after_ids = [pid for pid in ctx["their_keep_ids"] if pid not in get_ids] + list(give_ids)
+
+    my_starters_after, my_by_pos_after, my_after_points = _week_lineup_analysis(
+        my_after_ids, players, ctx["roster_positions"], ctx["flex_positions"], ctx["current_week"], ctx["current_week"],
+    )
+    if not _qb_te_must_start(get_ids, my_starters_after, players):
+        return None
+
+    legal, _ = _lineup_legality(my_after_ids, players, ctx["rules"])
+    must_drop_mine, drop_ids_mine, can_fill_mine = _must_drop_info(
+        my_after_ids, ctx["total_roster_slots"], players, ctx["waiver_by_position"],
+    )
+    if not legal and not must_drop_mine:
+        return None
+
+    their_starters_after, their_by_pos_after, their_after_points = _week_lineup_analysis(
+        their_after_ids, players, ctx["roster_positions"], ctx["flex_positions"], ctx["current_week"], ctx["current_week"],
+    )
+    their_legal, _ = _lineup_legality(their_after_ids, players, ctx["rules"])
+    must_drop_theirs, drop_ids_theirs, can_fill_theirs = _must_drop_info(
+        their_after_ids, ctx["total_roster_slots"], players, ctx["waiver_by_position"],
+    )
+    if not their_legal and not must_drop_theirs:
+        return None
+
+    my_delta = round(my_after_points - ctx["my_baseline_points"], 2)
+    their_delta = round(their_after_points - ctx["their_baseline_points"], 2)
+
+    their_need_fit = _need_fit(give_ids, players, ctx["their_weakness"])
+    # Der Partner muss etwas davon haben: Lineup-Gewinn oder Bedarf auf der
+    # Position - sonst ist das Paket für ihn unrealistisch, egal wie fair
+    # der Marktwert aussieht.
+    if not (their_delta > 0 or their_need_fit > 0):
+        return None
+
+    give_value = sum(_player_value(p) for p in give_combo)
+    get_value = sum(_player_value(p) for p in get_combo)
+    my_need_fit = _need_fit(get_ids, players, ctx["my_weakness"])
+    partner_type = ctx["partner_type"]
+    acceptance = _acceptance_label(give_value, get_value, their_delta, their_need_fit, partner_type)
+
+    purpose_notes = []
+    for p in get_combo:
+        note = _named_purpose(p, my_starters_after, ctx["my_starters_by_pos"], ctx["bye_calendar_weeks"])
+        if note:
+            purpose_notes.append(f"{p.get('name')}: {note}")
+
+    has_injured = any(p.get("injury_status") in HARD_OUT_STATUSES for p in give_combo + get_combo)
+    injured_detail = [
+        {"player_id": p["id"], "name": p.get("name"), "status": p.get("injury_status"), "note": _injury_note(p)}
+        for p in give_combo + get_combo if p.get("injury_status") in HARD_OUT_STATUSES
+    ]
+
+    bench_before = _bench_snapshot(ctx["my_current_ids"], players, ctx["my_starter_ids"])
+    bench_after = _bench_snapshot(my_after_ids, players, my_starters_after)
+
+    is_rival = False
+    pr = ctx["playoff_results"].get(ctx["roster_id"])
+    if pr is not None and ctx["playoff_teams"]:
+        prob = pr.get("playoff_probability", 0)
+        is_rival = 15 <= prob <= 95 and abs((pr.get("projected_rank") or 99) - ctx["playoff_teams"]) <= 2.5
+
+    return {
+        "roster_id": ctx["roster_id"], "team_name": ctx["team_name"],
+        "give_player_ids": sorted(give_ids), "get_player_ids": sorted(get_ids),
+        "give_value": round(give_value), "get_value": round(get_value),
+        "value_diff_pct": diff_pct_value,
+        "lineup_points_before": ctx["my_baseline_points"], "lineup_points_after": my_after_points, "lineup_delta": my_delta,
+        "their_lineup_points_before": ctx["their_baseline_points"], "their_lineup_points_after": their_after_points,
+        "their_lineup_delta": their_delta,
+        "is_win_win": my_delta > 0 and their_delta > 0,
+        "bench_before": bench_before, "bench_after": bench_after,
+        "acceptance": acceptance, "partner_type": partner_type,
+        "label": _package_label(len(give_ids), len(get_ids)),
+        "format": f"{len(give_ids)}-{len(get_ids)}",
+        "purpose_notes": purpose_notes,
+        "roster_legal_for_me": legal, "must_drop_players": must_drop_mine,
+        "my_drop_candidate_ids": drop_ids_mine, "can_fill_via_waiver_mine": can_fill_mine,
+        "their_roster_legal": their_legal, "their_must_drop_players": must_drop_theirs,
+        "their_drop_candidate_ids": drop_ids_theirs, "can_fill_via_waiver_theirs": can_fill_theirs,
+        "has_injured_player": has_injured, "injured_players_detail": injured_detail,
+        "my_need_fit": my_need_fit, "their_need_fit": their_need_fit,
+        "their_record": ctx["their_record"], "their_waiver_moves": ctx["their_waiver_moves"], "their_trades": ctx["their_trades"],
+        "is_current_week_opponent": ctx["roster_id"] == ctx["current_opponent_roster_id"],
+        "is_playoff_rival": is_rival,
+        "partner_accept_reasons": _partner_accept_reasons(their_need_fit, their_delta, partner_type, acceptance),
+    }
+
+
+def _score(c):
+    rival_penalty = 0.5 * max(c["their_lineup_delta"], 0) if c["is_playoff_rival"] else 0
+    return c["lineup_delta"] - rival_penalty
+
+
+def _combo_key(c):
+    return (c["roster_id"], tuple(c["give_player_ids"]), tuple(c["get_player_ids"]))
+
+
+def _with_breakdown(c, ctx_common):
+    if "value_breakdown" in c:
+        return c
+    players = ctx_common["players"]
+    give_ids = set(c["give_player_ids"])
+    get_ids = set(c["get_player_ids"])
+    my_after_ids = [pid for pid in ctx_common["my_current_ids"] if pid not in give_ids] + list(get_ids)
+    breakdown = _value_breakdown(
+        ctx_common["my_current_ids"], my_after_ids, players, ctx_common["roster_positions"], ctx_common["flex_positions"],
+        ctx_common["current_week"], ctx_common["deadline_weeks"], ctx_common["playoff_weeks"],
+    )
+    c["value_breakdown"] = breakdown
+    c["value_delta_until_deadline"] = breakdown["until_deadline_total"]
+    c["value_delta_playoffs"] = breakdown["playoffs_total"]
+    return c
 
 
 # ---------------------------------------------------------------------------
@@ -656,332 +616,120 @@ def compute(data, rules, bye_weeks_by_team):
     current_opponent_roster_id = ((data.get("matchup") or {}).get("opponent") or {}).get("roster_id")
     playoff_results = {r["roster_id"]: r for r in ((data.get("playoffs") or {}).get("results") or [])}
     waiver_by_position_all = (data.get("waiver") or {}).get("by_position") or {}
+    team_schedules = data.get("team_schedules") or {}
+    defense_ranks = data.get("defense_position_ranks") or {}
+    max_qb = max(1, rules.get("num_qb_starters") or 1)
+    max_te = max(1, rules.get("starter_counts", {}).get("TE", 1) or 1)
 
     weakness = weakness_matrix(teams, players)
     my_weakness = weakness.get(my_roster_id, {})
-
-    sell_buy = data.get("sell_buy") or {"sell_high": [], "buy_low": []}
-    sell_high_ids = {e["player_id"] for e in sell_buy.get("sell_high", []) if e.get("is_mine")}
-    buy_low_ids = {e["player_id"] for e in sell_buy.get("buy_low", [])}
-
     scouting_by_roster = {p["roster_id"]: p for p in (data.get("league_feed") or {}).get("scouting_profiles", [])}
 
-    my_players_by_value = sorted(
-        (players[pid] for pid in my_team["players"] if pid in players and players[pid].get("trade_value")),
-        key=lambda p: p["trade_value"], reverse=True,
-    )
-    key_player_ids = {p["id"] for p in my_players_by_value[:MY_KEY_PLAYER_COUNT]}
-
     my_current_ids = [s["player_id"] for s in data["my_roster"]["slots"]] + data["my_roster"]["bench"]
-    _starters0, _by_pos0, my_baseline_points = _week_lineup_analysis(
+    my_starter_ids, my_starters_by_pos_full, my_baseline_points = _week_lineup_analysis(
         my_current_ids, players, roster_positions, flex_positions, current_week, current_week,
     )
-
     my_starters_by_pos = {}
     for s in data["my_roster"]["slots"]:
         p = players.get(s["player_id"])
         if p:
             my_starters_by_pos.setdefault(p["position"], []).append(p)
-    my_roster_by_pos = {}
-    for pid in my_current_ids:
-        p = players.get(pid)
-        if p:
-            my_roster_by_pos.setdefault(p["position"], []).append(p)
 
     bye_calendar_weeks = set()
     if playoff_week_start:
         window_start = playoff_week_start - NEAR_PLAYOFF_WINDOW
         bye_calendar_weeks = set(range(window_start, playoff_week_start))
-
     deadline_weeks = list(range(current_week, trade_deadline + 1))
     playoff_weeks = list(range(playoff_week_start, min((playoff_week_start or 14) + 4, 19))) if playoff_week_start else []
-    remaining_weeks_list = sorted({g["week"] for g in data["planner"]["remaining_schedule"]})
-    remaining_weeks_estimate = min(len(remaining_weeks_list), 12) or 1
 
     my_full_pool = _tradeable_pool(my_team, players)
     my_full_ids = [p["id"] for p in my_full_pool]
-    my_pool_ids = my_full_ids[:POOL_CAP]
+    my_pool_capped = my_full_pool[:POOL_CAP]
+    my_combos_capped = _precompute_combos(my_pool_capped, GIVE_MAX_SIDE, my_starter_ids)
 
-    all_states = []
-    team_waiver_cache = {}
-    team_contexts = {}
+    ctx_common = {
+        "players": players, "roster_positions": roster_positions, "flex_positions": flex_positions,
+        "current_week": current_week, "deadline_weeks": deadline_weeks, "playoff_weeks": playoff_weeks,
+        "my_current_ids": my_current_ids,
+    }
+
+    all_candidates = []
+    team_data = {}
     pool_cap_current = POOL_CAP
-    perf = {"evals": 0}
+    perf = {"value_checks": 0, "expensive_evals": 0}
 
     teams_to_process = [t for t in teams if t["roster_id"] != my_roster_id]
     for idx, team in enumerate(teams_to_process):
         elapsed = time.monotonic() - start_time
         remaining_teams = len(teams_to_process) - idx
-        if elapsed > PERFORMANCE_BUDGET_SECONDS * 0.6 and remaining_teams > 3 and pool_cap_current > 5:
-            pool_cap_current = max(5, pool_cap_current - 2)
+        if elapsed > PERFORMANCE_BUDGET_SECONDS * 0.6 and remaining_teams > 3 and pool_cap_current > 6:
+            pool_cap_current = max(6, pool_cap_current - 2)
 
         their_full_pool = _tradeable_pool(team, players)
         their_full_ids = [p["id"] for p in their_full_pool]
         if not their_full_ids:
             continue
-        their_pool_ids = their_full_ids[:pool_cap_current]
+        their_pool_capped = their_full_pool[:pool_cap_current]
+        their_combos_capped = _precompute_combos(their_pool_capped, GET_MAX_SIDE)
 
         their_weakness = weakness.get(team["roster_id"], {})
         their_rank = team.get("rank") or (num_teams or 14)
         scouting = scouting_by_roster.get(team["roster_id"])
         partner_type = _partner_type(their_rank, num_teams, playoff_teams, scouting)
         their_keep_ids = team["players"]
-
         _ts0, _tbp0, their_baseline_points = _week_lineup_analysis(
             their_keep_ids, players, roster_positions, flex_positions, current_week, current_week,
         )
 
-        their_waiver_by_pos = waiver_by_position_all
-
-        ctx = {
-            "players": players,
-            "roster_positions": roster_positions,
-            "flex_positions": flex_positions,
-            "current_week": current_week,
-            "rules": rules,
-            "bye_calendar_weeks": bye_calendar_weeks,
-            "my_current_ids": my_current_ids,
-            "their_keep_ids": their_keep_ids,
-            "my_baseline_points": my_baseline_points,
-            "their_baseline_points": their_baseline_points,
-            "total_roster_slots": total_roster_slots,
-            "my_waiver_by_pos": waiver_by_position_all,
-            "their_waiver_by_pos": their_waiver_by_pos,
-            "my_weakness": my_weakness,
-            "their_weakness": their_weakness,
+        ctx = dict(ctx_common)
+        ctx.update({
+            "rules": rules, "bye_calendar_weeks": bye_calendar_weeks,
+            "their_keep_ids": their_keep_ids, "my_baseline_points": my_baseline_points,
+            "their_baseline_points": their_baseline_points, "total_roster_slots": total_roster_slots,
+            "waiver_by_position": waiver_by_position_all, "my_weakness": my_weakness, "their_weakness": their_weakness,
+            "my_starter_ids": my_starter_ids, "my_starters_by_pos": my_starters_by_pos,
+            "roster_id": team["roster_id"], "team_name": team["team_name"], "partner_type": partner_type,
+            "their_record": f"{team.get('wins', 0)}-{team.get('losses', 0)}",
+            "their_waiver_moves": scouting["waiver_moves"] if scouting else None,
+            "their_trades": scouting["trades"] if scouting else None,
+            "current_opponent_roster_id": current_opponent_roster_id,
+            "playoff_results": playoff_results, "playoff_teams": playoff_teams,
+        })
+        team_data[team["roster_id"]] = {
+            "ctx": ctx, "their_full_pool": their_full_pool, "their_full_ids": their_full_ids,
+            "their_pool_capped": their_pool_capped, "their_combos_capped": their_combos_capped,
         }
-        team_contexts[team["roster_id"]] = (ctx, their_full_ids, their_pool_ids)
 
-        states = _generate_team_pair_states(my_pool_ids[: pool_cap_current], their_pool_ids, ctx, perf)
-        for st in states:
-            st["roster_id"] = team["roster_id"]
-            st["team_name"] = team["team_name"]
-            st["partner_type"] = partner_type
-            st["their_rank"] = their_rank
-            st["their_record"] = f"{team.get('wins', 0)}-{team.get('losses', 0)}"
-            st["their_waiver_moves"] = scouting["waiver_moves"] if scouting else None
-            st["their_trades"] = scouting["trades"] if scouting else None
-        all_states.extend(states)
+        for give_rec in my_combos_capped:
+            for get_rec in their_combos_capped:
+                perf["value_checks"] += 1
+                diff_pct = _value_check(give_rec, get_rec, max_qb, max_te, tolerance=TOLERANCE_MAX)
+                if diff_pct is None:
+                    continue
+                perf["expensive_evals"] += 1
+                cand = _evaluate_candidate(set(give_rec["ids"]), set(get_rec["ids"]), ctx, diff_pct)
+                if cand:
+                    all_candidates.append(cand)
 
-    build_seconds_search = round(time.monotonic() - start_time, 2)
+    search_seconds = round(time.monotonic() - start_time, 2)
     performance_note = None
-    if build_seconds_search > PERFORMANCE_BUDGET_SECONDS:
+    if search_seconds > PERFORMANCE_BUDGET_SECONDS:
         performance_note = (
-            f"Die Trade-Suche hat {build_seconds_search}s gedauert und wurde für die letzten Teams auf "
-            f"die {pool_cap_current} wertvollsten Spieler je Team begrenzt, um den Build nicht unnötig zu "
-            "verlangsamen. Alle Hart-Regeln blieben dabei unverändert in Kraft."
+            f"Die Paket-Suche hat {search_seconds}s gedauert und wurde für die letzten Teams auf die "
+            f"{pool_cap_current} wertvollsten Spieler je Team begrenzt. Alle Wert- und Sinn-Regeln blieben "
+            "dabei unverändert in Kraft."
         )
 
-    # ---- Kandidaten zu vollständigen Vorschlägen anreichern -----------------
-    def finalize(st, compute_breakdown=True):
-        give_combo = [players[i] for i in st["give_player_ids"]]
-        get_combo = [players[i] for i in st["get_player_ids"]]
-        give_ids = set(st["give_player_ids"])
-        get_ids = set(st["get_player_ids"])
-        diff_pct = st["value_diff_pct"] / 100.0
-        side_size = max(len(give_ids), len(get_ids))
-        level = _relaxation_level(diff_pct, st["lineup_delta"], st["their_lineup_delta"], side_size)
-
-        labels = _purpose_labels(
-            give_combo, get_combo, weakness.get(st["roster_id"], {}), st["lineup_delta"],
-            my_starters_by_pos, my_roster_by_pos, bye_calendar_weeks, sell_high_ids, buy_low_ids,
-            st["their_need_fit"], level,
-        )
-        if not labels:
-            return None
-
-        acceptance = _acceptance_label(
-            st["give_value"], st["get_value"], st["their_lineup_delta"], st["their_need_fit"], st["partner_type"],
-        )
-        has_injured = any(p.get("injury_status") in HARD_OUT_STATUSES for p in give_combo + get_combo)
-        injured_detail = [
-            {"player_id": p["id"], "name": p.get("name"), "status": p.get("injury_status")}
-            for p in give_combo + get_combo if p.get("injury_status") in HARD_OUT_STATUSES
-        ]
-        includes_key_player = bool(give_ids & key_player_ids)
-        stance = _age_stance(give_combo, get_combo, is_dynasty)
-        is_rival = False
-        pr = playoff_results.get(st["roster_id"])
-        if pr is not None and playoff_teams:
-            prob = pr.get("playoff_probability", 0)
-            is_rival = 15 <= prob <= 95 and abs((pr.get("projected_rank") or 99) - playoff_teams) <= 2.5
-
-        proposal = {
-            "roster_id": st["roster_id"],
-            "team_name": st["team_name"],
-            "give_player_ids": st["give_player_ids"],
-            "get_player_ids": st["get_player_ids"],
-            "give_value": st["give_value"],
-            "get_value": st["get_value"],
-            "value_diff_pct": st["value_diff_pct"],
-            "value_diff_pct_signed": st["value_diff_pct_signed"],
-            "lineup_points_before": st["lineup_points_before"],
-            "lineup_points_after": st["lineup_points_after"],
-            "lineup_delta": st["lineup_delta"],
-            "their_lineup_points_before": st["their_lineup_points_before"],
-            "their_lineup_points_after": st["their_lineup_points_after"],
-            "their_lineup_delta": st["their_lineup_delta"],
-            "is_win_win": st["is_win_win"],
-            "acceptance": acceptance,
-            "partner_type": st["partner_type"],
-            "stance": stance,
-            "purpose_labels": labels,
-            "roster_legal_for_me": st["roster_legal_for_me"],
-            "must_drop_players": st["must_drop_players"],
-            "my_drop_candidate_ids": st["my_drop_candidate_ids"],
-            "can_fill_via_waiver_mine": st["can_fill_via_waiver_mine"],
-            "their_roster_legal": st["their_roster_legal"],
-            "their_must_drop_players": st["their_must_drop_players"],
-            "their_drop_candidate_ids": st["their_drop_candidate_ids"],
-            "can_fill_via_waiver_theirs": st["can_fill_via_waiver_theirs"],
-            "includes_key_player": includes_key_player,
-            "has_injured_player": has_injured,
-            "injured_players_detail": injured_detail,
-            "my_need_fit": st["my_need_fit"],
-            "their_need_fit": st["their_need_fit"],
-            "their_record": st["their_record"],
-            "their_waiver_moves": st["their_waiver_moves"],
-            "their_trades": st["their_trades"],
-            "is_current_week_opponent": st["roster_id"] == current_opponent_roster_id,
-            "is_playoff_rival": is_rival,
-            "relaxation_level": level,
-            "relaxation_label": RELAXATION_LABELS[level],
-            "reasons": _reasons(give_combo, get_combo, st["their_need_fit"], st["my_need_fit"], diff_pct),
-            "partner_accept_reasons": _partner_accept_reasons(
-                give_combo, st["their_need_fit"], st["their_lineup_delta"], st["partner_type"], acceptance,
-            ),
-        }
-        if compute_breakdown:
-            my_after_ids = [pid for pid in my_current_ids if pid not in give_ids] + list(get_ids)
-            breakdown = _value_breakdown(
-                my_current_ids, my_after_ids, players, roster_positions, flex_positions,
-                current_week, deadline_weeks, playoff_weeks,
-            )
-            proposal["value_breakdown"] = breakdown
-            proposal["my_value_delta_until_deadline"] = breakdown["until_deadline_total"]
-            proposal["my_value_delta_playoffs"] = breakdown["playoffs_total"]
-        return proposal
-
-    finalized_all = [p for p in (finalize(st, compute_breakdown=False) for st in all_states) if p]
-
-    # ---- Allgemeine Top-Liste: Vielfalt statt Dopplungen --------------------
-    def sort_key(p):
-        rival_penalty = 0.5 * max(p["their_lineup_delta"], 0) if p["is_playoff_rival"] else 0
-        return p["lineup_delta"] - rival_penalty
-
-    by_team = {}
-    for p in finalized_all:
-        by_team.setdefault(p["roster_id"], []).append(p)
-
-    pre_diverse = []
-    for rid, cands in by_team.items():
-        cands.sort(key=sort_key, reverse=True)
-        pre_diverse.extend(cands[:MAX_PROPOSALS_PER_TEAM * 3])
-
-    pre_diverse.sort(key=sort_key, reverse=True)
-
-    def anchor_give(p):
-        return max(p["give_player_ids"], key=lambda pid: (players.get(pid) or {}).get("trade_value") or 0)
-
-    give_appearance_count = {}
-    group_seen = {}
-    diverse = []
-    seen_combo = set()
-    for p in pre_diverse:
-        combo_key = (p["roster_id"], tuple(p["give_player_ids"]), tuple(p["get_player_ids"]))
-        if combo_key in seen_combo:
-            continue
-        seen_combo.add(combo_key)
-
-        anchor = anchor_give(p)
-        group_key = (p["roster_id"], anchor)
-        if group_key in group_seen:
-            kept = group_seen[group_key]
-            if len(kept.setdefault("variants", [])) < 2:
-                kept["variants"].append({
-                    "give_player_ids": p["give_player_ids"],
-                    "get_player_ids": p["get_player_ids"],
-                    "lineup_delta": p["lineup_delta"],
-                    "value_diff_pct": p["value_diff_pct"],
-                })
-            continue
-
-        if give_appearance_count.get(anchor, 0) >= MAX_GIVE_PLAYER_APPEARANCES:
-            continue
-
-        p["variants"] = []
-        group_seen[group_key] = p
-        give_appearance_count[anchor] = give_appearance_count.get(anchor, 0) + 1
-        diverse.append(p)
-        if len(diverse) >= MAX_TOTAL_PROPOSALS:
-            break
-
-    # Je Bedarfsposition sicherstellen, dass mind. 1 Vorschlag vertreten ist,
-    # falls einer existiert (sonst würde z.B. ein RB/TE-Bedarf stumm untergehen).
-    needed_positions = sorted([p for p in TRADE_POSITIONS if my_weakness.get(p, 0) >= 1.5], key=lambda p: my_weakness.get(p, 0), reverse=True)
-    represented_positions = {pos for p in diverse for pid in p["get_player_ids"] for pos in [players.get(pid, {}).get("position")]}
-    for pos in needed_positions:
-        if pos in represented_positions:
-            continue
-        candidate = next(
-            (p for p in pre_diverse if any(players.get(pid, {}).get("position") == pos for pid in p["get_player_ids"])
-             and (p["roster_id"], tuple(p["give_player_ids"]), tuple(p["get_player_ids"])) not in
-             {(d["roster_id"], tuple(d["give_player_ids"]), tuple(d["get_player_ids"])) for d in diverse}),
-            None,
-        )
-        if candidate:
-            candidate["variants"] = candidate.get("variants", [])
-            diverse.append(candidate)
-
-    diverse.sort(key=sort_key, reverse=True)
-    final_proposals = diverse[:MAX_TOTAL_PROPOSALS]
-    for p in final_proposals:
-        give_ids = set(p["give_player_ids"])
-        get_ids = set(p["get_player_ids"])
-        my_after_ids = [pid for pid in my_current_ids if pid not in give_ids] + list(get_ids)
-        breakdown = _value_breakdown(
-            my_current_ids, my_after_ids, players, roster_positions, flex_positions,
-            current_week, deadline_weeks, playoff_weeks,
-        )
-        p["value_breakdown"] = breakdown
-        p["my_value_delta_until_deadline"] = breakdown["until_deadline_total"]
-        p["my_value_delta_playoffs"] = breakdown["playoffs_total"]
-
-    # ---- Teil D/F: Indizes je handelbarem Spieler ----------------------------
-    def with_breakdown(p):
-        if "value_breakdown" in p:
-            return p
-        give_ids = set(p["give_player_ids"])
-        get_ids = set(p["get_player_ids"])
-        my_after_ids = [pid for pid in my_current_ids if pid not in give_ids] + list(get_ids)
-        breakdown = _value_breakdown(
-            my_current_ids, my_after_ids, players, roster_positions, flex_positions,
-            current_week, deadline_weeks, playoff_weeks,
-        )
-        p["value_breakdown"] = breakdown
-        p["my_value_delta_until_deadline"] = breakdown["until_deadline_total"]
-        p["my_value_delta_playoffs"] = breakdown["playoffs_total"]
-        return p
-
+    # ---- Indizes je Spieler x Format -----------------------------------------
     block_index = {}
-    for p in finalized_all:
-        for pid in p["give_player_ids"]:
-            block_index.setdefault(pid, []).append(p)
     target_index = {}
-    for p in finalized_all:
-        for pid in p["get_player_ids"]:
-            target_index.setdefault(pid, []).append(p)
-
-    def dedupe_sorted(lst, key):
-        seen = set()
-        out = []
-        for p in sorted(lst, key=key, reverse=True):
-            combo_key = (p["roster_id"], tuple(p["give_player_ids"]), tuple(p["get_player_ids"]))
-            if combo_key in seen:
-                continue
-            seen.add(combo_key)
-            out.append(p)
-        return out
+    by_roster_id = {}
+    for c in all_candidates:
+        by_roster_id.setdefault(c["roster_id"], []).append(c)
+        for pid in c["give_player_ids"]:
+            block_index.setdefault(pid, {}).setdefault(c["format"], []).append(c)
+        for pid in c["get_player_ids"]:
+            target_index.setdefault(pid, {}).setdefault(c["format"], []).append(c)
 
     owner_of_map = {}
     team_by_id = {t["roster_id"]: t for t in teams}
@@ -991,143 +739,414 @@ def compute(data, rules, bye_weeks_by_team):
         for pid in t["players"]:
             owner_of_map[pid] = t["roster_id"]
 
-    def _owner_of(pid):
-        return owner_of_map.get(pid)
-
-    def _build_topup_index(player_ids, side, base_index):
-        """Reichert den Index für jeden Spieler an, der noch nicht genug
-        Treffer aus der allgemeinen Suche hat, mit einer gezielten Nachsuche
-        (_topup_states_for_player) an - die roster_id ist dabei immer schon
-        aus der umschließenden Team-Schleife bekannt, keine Rückableitung
-        nötig."""
-        out = {}
-        for pid in player_ids:
-            matches = dedupe_sorted(base_index.get(pid, []), key=sort_key)
-            min_needed = MIN_PROPOSALS_PER_PLAYER if side == "give" else TARGET_OFFER_TIER_COUNT
-            if len(matches) >= min_needed:
-                out[pid] = matches
+    def _dedupe_sorted(lst):
+        seen = set()
+        out = []
+        for c in sorted(lst, key=_score, reverse=True):
+            key = _combo_key(c)
+            if key in seen:
                 continue
-            extra_finalized = []
-            for rid, (ctx, their_full_ids, _pool_ids) in team_contexts.items():
-                if side == "get" and rid != _owner_of(pid):
-                    continue
-                extra_raw = _topup_states_for_player(pid, side, my_full_ids, their_full_ids, ctx, perf)
-                team = team_by_id.get(rid)
-                if not team:
-                    continue
-                scouting = scouting_by_roster.get(rid)
-                partner_type = _partner_type(team.get("rank") or (num_teams or 14), num_teams, playoff_teams, scouting)
-                for st in extra_raw:
-                    st["roster_id"] = rid
-                    st["team_name"] = team["team_name"]
-                    st["partner_type"] = partner_type
-                    st["their_record"] = f"{team.get('wins', 0)}-{team.get('losses', 0)}"
-                    st["their_waiver_moves"] = scouting["waiver_moves"] if scouting else None
-                    st["their_trades"] = scouting["trades"] if scouting else None
-                    fp = finalize(st, compute_breakdown=False)
-                    if fp:
-                        extra_finalized.append(fp)
-            matches = dedupe_sorted(matches + extra_finalized, key=sort_key)
-            out[pid] = matches
+            seen.add(key)
+            out.append(c)
         return out
 
-    block_player_candidates = _build_topup_index(my_full_ids, "give", block_index)
-    opponent_tradeable_ids = [pid for pid, rid in owner_of_map.items() if rid in team_contexts and players.get(pid, {}).get("trade_value")]
-    target_raw_index = _build_topup_index(opponent_tradeable_ids, "get", target_index)
+    def _coverage(by_format):
+        total = sum(len(v) for v in by_format.values())
+        return total, len(by_format)
 
-    block_player_candidates = {
-        pid: {
-            "section_a": [with_breakdown(p) for p in dedupe_sorted(
-                [m for m in matches if any(players.get(gid, {}).get("position") in needed_positions for gid in m["get_player_ids"])],
-                key=sort_key,
-            )[:10]],
-            "section_b": [with_breakdown(p) for p in matches[:10]],
+    def _explain_no_package(any_value_fair):
+        """Wenn auch die Nachsuche nichts findet, kurz erklären warum, statt
+        kommentarlos leer zu bleiben (Teil 4: 'nur wenn auch das nichts
+        ergibt, kurz erklären, warum')."""
+        if not any_value_fair:
+            return (
+                f"Kein Angebot erreicht die Wert-Toleranz (max. {TOLERANCE_MAX*100:.0f}% zu meinen Lasten, "
+                f"max. {GAIN_CAP*100:.0f}% zu meinen Gunsten) oder verletzt die Superstar-Regel "
+                f"(höchstens das {SUPERSTAR_CAP}-Fache meines wertvollsten Gegenstücks)."
+            )
+        return (
+            "Wertfaire Pakete existieren, verletzen aber Roster-Regeln (Pflicht-Slot, Start-QB/TE, "
+            "Roster-Limit) oder bringen dem Partner keinen Lineup-Gewinn bzw. Bedarf."
+        )
+
+    def _topup_give(pid, companions_pool, by_format):
+        """Gezielte Nachsuche: `pid` fest auf meiner Seite, Begleitspieler aus
+        `companions_pool` (mein Kader ohne pid), gegen die schon
+        vorberechneten Partner-Kombinationen jedes Teams - linear im
+        Aufwand, weil der Anker feststeht und die Gegenseite bereits fertig
+        vorliegt."""
+        anchor = players[pid]
+        companions = [p for p in companions_pool if p["id"] != pid][:TOPUP_COMPANION_CAP]
+        give_recs = _combos_anchored(anchor, companions, GIVE_MAX_SIDE)
+        any_value_fair = False
+        for rid, td in team_data.items():
+            for give_rec in give_recs:
+                for get_rec in td["their_combos_capped"]:
+                    diff_pct = _value_check(give_rec, get_rec, max_qb, max_te, tolerance=TOLERANCE_MAX)
+                    if diff_pct is None:
+                        continue
+                    any_value_fair = True
+                    cand = _evaluate_candidate(set(give_rec["ids"]), set(get_rec["ids"]), td["ctx"], diff_pct)
+                    if cand:
+                        by_format.setdefault(cand["format"], []).append(cand)
+        if not by_format:
+            return _explain_no_package(any_value_fair)
+        return None
+
+    def _topup_target(pid, by_format):
+        """Gezielte Nachsuche: `pid` (ein gegnerischer Spieler) fest auf der
+        Gegenseite, Begleitspieler aus demselben Team, gegen meine schon
+        vorberechneten Kombinationen."""
+        rid = owner_of_map.get(pid)
+        if rid is None or rid not in team_data:
+            return "Dieser Spieler gehört keinem handelbaren Gegner-Team an."
+        td = team_data[rid]
+        anchor = players.get(pid)
+        if not anchor:
+            return "Spielerdaten unvollständig."
+        companions = [p for p in td["their_full_pool"] if p["id"] != pid][:TOPUP_COMPANION_CAP]
+        get_recs = _combos_anchored(anchor, companions, GET_MAX_SIDE)
+        any_value_fair = False
+        for give_rec in my_combos_capped:
+            for get_rec in get_recs:
+                diff_pct = _value_check(give_rec, get_rec, max_qb, max_te, tolerance=TOLERANCE_MAX)
+                if diff_pct is None:
+                    continue
+                any_value_fair = True
+                cand = _evaluate_candidate(set(give_rec["ids"]), set(get_rec["ids"]), td["ctx"], diff_pct)
+                if cand:
+                    by_format.setdefault(cand["format"], []).append(cand)
+        if not by_format:
+            return _explain_no_package(any_value_fair)
+        return None
+
+    default_format_keys = {f"{g}-{s}" for g, s in DEFAULT_FORMATS}
+
+    def _finalize_player_index(by_format):
+        """Begrenzt je Format auf die besten paar Pakete (Standardformate
+        etwas großzügiger als die selteneren Zusatzformate) und hält die
+        volle Woche-für-Woche-Aufschlüsselung nur für das insgesamt beste
+        Paket vor - alle anderen bekommen nur die Summenwerte (bis
+        Deadline/Playoffs/diese Woche), um die Datei nicht mit redundanten
+        Wochenlisten aufzublähen."""
+        trimmed = {
+            fmt: [
+                _with_breakdown(c, ctx_common)
+                for c in _dedupe_sorted(lst)[:(MAX_PACKAGES_PER_FORMAT if fmt in default_format_keys else EXTRA_FORMAT_CAP)]
+            ]
+            for fmt, lst in by_format.items() if lst
         }
-        for pid, matches in block_player_candidates.items()
-    }
+        all_items = [c for lst in trimmed.values() for c in lst]
+        if not all_items:
+            return trimmed
+        best_key = _combo_key(max(all_items, key=_score))
+        for c in all_items:
+            if _combo_key(c) != best_key:
+                c["value_breakdown"] = {k: v for k, v in c["value_breakdown"].items() if k != "weeks"}
+        return trimmed
 
-    target_offers = {}
-    for pid, matches in target_raw_index.items():
+    block_candidates = {}
+    for pid in my_full_ids:
+        by_format = {fmt: list(lst) for fmt, lst in block_index.get(pid, {}).items()}
+        total, n_formats = _coverage(by_format)
+        empty_reason = None
+        if total < MIN_PACKAGES_PER_PLAYER or n_formats < MIN_FORMATS_PER_PLAYER:
+            empty_reason = _topup_give(pid, my_full_pool, by_format)
+        block_candidates[pid] = {"by_format": _finalize_player_index(by_format), "empty_reason": empty_reason}
+
+    opponent_tradeable_ids = [
+        pid for pid, rid in owner_of_map.items() if rid in team_data
+        and players.get(pid, {}).get("position") in TRADE_POSITIONS
+        and (players.get(pid, {}).get("trade_value") or 0) >= TARGET_MIN_TRADE_VALUE
+    ]
+    target_candidates = {}
+    for pid in opponent_tradeable_ids:
+        by_format = {fmt: list(lst) for fmt, lst in target_index.get(pid, {}).items()}
+        total, n_formats = _coverage(by_format)
+        empty_reason = None
+        if total < MIN_PACKAGES_PER_PLAYER or n_formats < MIN_FORMATS_PER_PLAYER:
+            empty_reason = _topup_target(pid, by_format)
+        target_candidates[pid] = {"by_format": _finalize_player_index(by_format), "empty_reason": empty_reason}
+
+    # ---- Trade-Ideen ----------------------------------------------------------
+    def _best_overall(predicate, idea_label, anlass_fn, limit=IDEA_LIMIT):
+        cands = [c for c in all_candidates if predicate(c)]
+        out = []
+        seen = set()
+        for c in sorted(cands, key=_score, reverse=True):
+            key = _combo_key(c)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = _with_breakdown(dict(c), ctx_common)
+            item["idea_label"] = idea_label
+            item["anlass"] = anlass_fn(item)
+            out.append(item)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _idea_result(items, reason_if_none):
+        """Mindestens 3 Ideen je Kategorie, sonst eine kurze Erklärung, warum
+        nicht (Teil 3/8) - auch wenn ein paar, aber weniger als 3 gefunden
+        wurden, statt nur beim kompletten Leerlauf."""
+        if not items:
+            return {"items": items, "empty_reason": reason_if_none}
+        if len(items) < 3:
+            return {
+                "items": items,
+                "empty_reason": (
+                    f"Nur {len(items)} von mindestens 3 gewünschten Ideen gefunden - "
+                    f"die Datenlage (Kader, Verletzungen, Bye-Wochen) gibt aktuell nicht mehr her."
+                ),
+            }
+        return {"items": items, "empty_reason": None}
+
+    ideas = {}
+
+    def _spitze_anlass(c):
+        return (
+            f"{len(c['give_player_ids'])} Spieler für {len(c['get_player_ids'])}: "
+            f"+{c['lineup_delta']} Pkt./Woche Lineup-Gewinn, Tiefe sinkt von {c['bench_before']['bench_value']} "
+            f"auf {c['bench_after']['bench_value']} Bank-Punkte/Woche"
+        )
+
+    spitze = _best_overall(
+        lambda c: c["label"] == "Spitze verbessern" and c["lineup_delta"] > 0,
+        "Spitze verbessern", _spitze_anlass,
+    )
+    ideas["spitze_verbessern"] = _idea_result(spitze, "Keine Konsolidierungs-Pakete mit Lineup-Gewinn gefunden.")
+
+    def _breite_anlass(c):
+        bench_gain = round(c["bench_after"]["bench_value"] - c["bench_before"]["bench_value"], 1)
+        return (
+            f"{len(c['give_player_ids'])} Spieler für {len(c['get_player_ids'])}: "
+            f"Bank-Tiefe {'+' if bench_gain >= 0 else ''}{bench_gain} Pkt./Woche, "
+            f"Lineup {'+' if c['lineup_delta'] >= 0 else ''}{c['lineup_delta']} Pkt./Woche"
+        )
+
+    breite = _best_overall(
+        lambda c: c["label"] == "Breite aufbauen" and (c["lineup_delta"] > 0 or c["bench_after"]["bench_value"] > c["bench_before"]["bench_value"]),
+        "Breite aufbauen", _breite_anlass,
+    )
+    ideas["breite_aufbauen"] = _idea_result(breite, "Keine Aufteilungs-Pakete mit Tiefe- oder Lineup-Gewinn gefunden.")
+
+    sell_buy = data.get("sell_buy") or {"sell_high": [], "buy_low": []}
+    sell_high_ids = {e["player_id"] for e in sell_buy.get("sell_high", []) if e.get("is_mine")}
+    sell_high_items = []
+    for pid in sell_high_ids:
+        matches = [c for c in block_index.get(pid, {}).values() for c in c]
         if not matches:
             continue
-        ranked = sorted(matches, key=lambda p: p["give_value"])
-        n = len(ranked)
-        tiers = {}
-        if n >= 1:
-            tiers["entry"] = with_breakdown(ranked[0])
-        if n >= 2:
-            tiers["mid"] = with_breakdown(ranked[min(n - 1, n // 2)])
-        if n >= 1:
-            tiers["max"] = with_breakdown(ranked[-1])
-        target_offers[pid] = tiers
+        best = sorted(matches, key=_score, reverse=True)[0]
+        entry = next((e for e in sell_buy["sell_high"] if e["player_id"] == pid), None)
+        best = _with_breakdown(dict(best), ctx_common)
+        best["idea_label"] = "Sell High"
+        best["anlass"] = f"{players[pid]['name']}: {entry['ppo_ratio']}x Punkte pro Opportunity ggü. Positions-Schnitt ({entry['opportunity_pg']}/Spiel) - Touchdown-Glück-Risiko"
+        sell_high_items.append(best)
+    sell_high_items = sorted(sell_high_items, key=_score, reverse=True)[:IDEA_LIMIT]
+    ideas["sell_high"] = _idea_result(sell_high_items, "Keine eigenen Sell-High-Kandidaten mit passendem Gegenangebot gefunden.")
 
-    # ---- Übersicht / Teams ---------------------------------------------------
-    team_summaries = []
-    team_pools = {}
-    for team in teams:
-        tw = weakness.get(team["roster_id"], {})
-        needs = sorted([p for p in TRADE_POSITIONS if tw.get(p, 0) >= 1.5], key=lambda p: tw.get(p, 0), reverse=True)
-        team_pools[str(team["roster_id"])] = [
-            {"player_id": p["id"], "trade_value": p["trade_value"], "position": p["position"]}
-            for p in _tradeable_pool(team, players)
-        ]
-        if team["roster_id"] == my_roster_id:
+    buy_low_items = []
+    for pid, p in players.items():
+        if p["position"] not in TRADE_POSITIONS:
             continue
-        team_summaries.append({"roster_id": team["roster_id"], "team_name": team["team_name"], "needs": needs})
+        if p.get("fantasy_team") and p["fantasy_team"]["roster_id"] == my_roster_id:
+            continue
+        status = p.get("injury_status")
+        if status not in SHORT_TERM_INJURY_STATUSES:
+            continue
+        if not p.get("trade_value") or (p.get("season_avg") or 0) < 5:
+            continue
+        matches = [c for lst in target_index.get(pid, {}).values() for c in lst]
+        if not matches:
+            continue
+        best = sorted(matches, key=_score, reverse=True)[0]
+        best = _with_breakdown(dict(best), ctx_common)
+        best["idea_label"] = "Buy Low"
+        best["risk_level"] = INJURY_RISK_LABEL.get(status, "mittel")
+        best["anlass"] = f"{p['name']}: {_injury_note(p)}"
+        buy_low_items.append(best)
+    buy_low_items = sorted(buy_low_items, key=_score, reverse=True)[:IDEA_LIMIT]
+    ideas["buy_low"] = _idea_result(buy_low_items, "Keine angeschlagenen Spieler mit kurzfristigem Status und hohem Restwert gefunden.")
+
+    # Lücken je Team (Bye + Verletzung) für Notlage/Bye-Weeks
+    team_gaps = {}
+    for t in teams:
+        s_ids = my_starter_ids if t["roster_id"] == my_roster_id else None
+        if s_ids is None:
+            s_ids, _bp, _pts = _week_lineup_analysis(t["players"], players, roster_positions, flex_positions, current_week, current_week)
+        team_gaps[t["roster_id"]] = _team_lineup_gaps(t["players"], s_ids, players, current_week)
+
+    def _surplus_at_position(pos):
+        return [p["id"] for p in my_full_pool if p["position"] == pos and p["id"] not in my_starter_ids]
+
+    bye_items = []
+    for pid, p in players.items():
+        if p["position"] not in TRADE_POSITIONS:
+            continue
+        fteam = p.get("fantasy_team")
+        if fteam and fteam.get("roster_id") == my_roster_id:
+            continue
+        if p.get("bye_week") not in (current_week, current_week + 1):
+            continue
+        if (p.get("season_avg") or 0) < 6 or not p.get("trade_value"):
+            continue
+        matches = [c for lst in target_index.get(pid, {}).values() for c in lst]
+        if not matches:
+            continue
+        best = sorted(matches, key=_score, reverse=True)[0]
+        owner_rid = owner_of_map.get(pid)
+        owner_gaps = [g for g in team_gaps.get(owner_rid, []) if g["position"] == p["position"]]
+        boost = bool(owner_gaps)
+        best = dict(best)
+        best["acceptance"] = _acceptance_label(best["give_value"], best["get_value"], best["their_lineup_delta"], best["their_need_fit"], best["partner_type"], boost=boost)
+        best = _with_breakdown(best, ctx_common)
+        best["idea_label"] = "Bye-Weeks ausnutzen (Kaufen)"
+        best["anlass"] = f"{p['name']}: Bye in Woche {p['bye_week']}, Saison-Schnitt {p.get('season_avg')} Pkt."
+        bye_items.append(best)
+
+    for g in team_gaps.get(my_roster_id, []):
+        if g["cause"] != "bye":
+            continue
+        surplus = _surplus_at_position(g["position"])
+        for sid in surplus:
+            matches = [c for lst in block_index.get(sid, {}).values() for c in lst]
+            if not matches:
+                continue
+            best = sorted(matches, key=_score, reverse=True)[0]
+            best = _with_breakdown(dict(best), ctx_common)
+            best["idea_label"] = "Bye-Weeks ausnutzen (Anbieten)"
+            best["anlass"] = f"Dein {g['position']}-Loch in Woche {g['week']} ({g['player_name']} Bye) durch Überschuss abgedeckt"
+            bye_items.append(best)
+            break
+    for rid, gaps in team_gaps.items():
+        if rid == my_roster_id:
+            continue
+        for g in gaps:
+            if g["cause"] != "bye":
+                continue
+            surplus = _surplus_at_position(g["position"])
+            for sid in surplus:
+                matches = [c for c in block_index.get(sid, {}).get("1-1", []) + block_index.get(sid, {}).get("1-2", []) if c["roster_id"] == rid]
+                if not matches:
+                    continue
+                best = _with_breakdown(dict(sorted(matches, key=_score, reverse=True)[0]), ctx_common)
+                best["idea_label"] = "Bye-Weeks ausnutzen (Anbieten)"
+                best["anlass"] = f"{best['team_name']} hat Bye-Lücke auf {g['position']} in Woche {g['week']} ({g['player_name']})"
+                bye_items.append(best)
+                break
+    bye_items = sorted(_dedupe_sorted(bye_items), key=_score, reverse=True)[:IDEA_LIMIT]
+    ideas["bye_weeks"] = _idea_result(bye_items, "Keine Bye-Wochen-Gelegenheit in den nächsten Wochen gefunden.")
+
+    partner_notlage_items = []
+    for rid, gaps in team_gaps.items():
+        if rid == my_roster_id:
+            continue
+        for g in gaps:
+            surplus = _surplus_at_position(g["position"])
+            for sid in surplus:
+                matches = [c for c in block_index.get(sid, {}).get("1-1", []) + block_index.get(sid, {}).get("1-2", []) if c["roster_id"] == rid]
+                if not matches:
+                    continue
+                best = _with_breakdown(dict(sorted(matches, key=_score, reverse=True)[0]), ctx_common)
+                best["idea_label"] = "Notlage des Partners nutzen"
+                cause_label = "Bye" if g["cause"] == "bye" else "Verletzt"
+                best["anlass"] = f"{best['team_name']}: {g['player_name']} ({cause_label}, Woche {g['week']}) - Bedarf {g['position']}, keine Bank-Alternative berechnet"
+                partner_notlage_items.append(best)
+                break
+    partner_notlage_items = sorted(_dedupe_sorted(partner_notlage_items), key=_score, reverse=True)[:IDEA_LIMIT]
+    ideas["partner_notlage"] = _idea_result(partner_notlage_items, "Keine nachgewiesene Lineup-Lücke bei anderen Teams gefunden.")
+
+    playoff_flags = _playoff_prep_flags(my_starter_ids, players, team_schedules, defense_ranks, playoff_weeks) if playoff_weeks else []
+    playoff_items = []
+    for flag in playoff_flags:
+        pos = flag["position"]
+        candidates_pos = [
+            c for lst in target_index.values() for c in lst.get("1-1", []) + lst.get("2-1", [])
+            if any(players.get(gid, {}).get("position") == pos for gid in c["get_player_ids"])
+        ]
+        if not candidates_pos:
+            continue
+        best = _with_breakdown(dict(sorted(candidates_pos, key=_score, reverse=True)[0]), ctx_common)
+        best["idea_label"] = "Playoff-Vorbereitung"
+        best["anlass"] = f"{players[flag['player_id']]['name']}: {flag['detail']}"
+        playoff_items.append(best)
+    playoff_items = sorted(_dedupe_sorted(playoff_items), key=_score, reverse=True)[:IDEA_LIMIT]
+    playoff_empty_reason = (
+        "Keine Playoff-Wochen in den Liga-Einstellungen gefunden." if not playoff_weeks else
+        "Keine Starter mit Bye in Woche 13/14 oder zwei+ schweren Playoff-Matchups gefunden."
+    )
+    ideas["playoff_vorbereitung"] = _idea_result(playoff_items, playoff_empty_reason)
+
+    team_pools = {
+        str(t["roster_id"]): [
+            {"player_id": p["id"], "trade_value": p.get("trade_value"), "position": p["position"], "name": p.get("name")}
+            for p in _tradeable_pool(t, players)
+        ]
+        for t in teams
+    }
 
     return {
-        "my_needs": needed_positions,
-        "key_player_ids": sorted(key_player_ids),
-        "team_summaries": team_summaries,
-        "proposals": final_proposals,
-        "block_player_candidates": {str(pid): v for pid, v in block_player_candidates.items()},
-        "target_offers": {str(pid): v for pid, v in target_offers.items()},
-        "lineup_points_baseline": my_baseline_points,
-        "weakness_matrix": {str(rid): w for rid, w in weakness.items()},
-        "team_pools": team_pools,
-        "remaining_weeks_estimate": remaining_weeks_estimate,
+        "data_as_of": data.get("generated_at"),
+        "my_needs": sorted([p for p in TRADE_POSITIONS if my_weakness.get(p, 0) >= 1.5], key=lambda p: my_weakness.get(p, 0), reverse=True),
         "league_rules_note": _league_rules_note(rules, is_dynasty, num_teams),
+        "formats": {"default": [f"{g}-{s}" for g, s in DEFAULT_FORMATS], "extra": [f"{g}-{s}" for g, s in EXTRA_FORMATS]},
+        "value_rules": {
+            "power": POWER, "gain_cap_pct": GAIN_CAP * 100, "tolerance_options_pct": [t * 100 for t in TOLERANCE_OPTIONS],
+            "default_tolerance_pct": DEFAULT_TOLERANCE * 100, "superstar_cap": SUPERSTAR_CAP, "top30_rank": TOP30_RANK,
+        },
+        "block_candidates": {str(pid): v for pid, v in block_candidates.items()},
+        "target_candidates": {str(pid): v for pid, v in target_candidates.items()},
+        "ideas": ideas,
+        "team_pools": team_pools,
         "performance_note": performance_note,
         "build_seconds": round(time.monotonic() - start_time, 2),
-        "states_evaluated": perf["evals"],
+        "value_checks": perf["value_checks"],
+        "expensive_evals": perf["expensive_evals"],
     }
 
 
 def validate_proposals(trade_finder_data, players):
-    """Build-Gate: prüft die harten Invarianten über ALLE tatsächlich
-    erzeugten Vorschläge (proposals + block_player_candidates + target_offers),
-    nicht nur Stichproben. Gibt eine Liste von Fehlertexten zurück (leer =
-    alles ok)."""
+    """Build-Gate: prüft die harten Regeln über ALLE tatsächlich erzeugten
+    Pakete (block_candidates, target_candidates, ideas) - nicht nur
+    Stichproben. Gibt eine Liste von Fehlertexten zurück (leer = alles ok)."""
     errors = []
+    seen_combos = set()
 
-    def check_proposal(p, source):
-        for pid in p["give_player_ids"] + p["get_player_ids"]:
+    def check(c, source):
+        for pid in c["give_player_ids"] + c["get_player_ids"]:
             pos = (players.get(pid) or {}).get("position")
             if pos in ("K", "DEF"):
-                errors.append(f"[{source}] Trade enthält K/DEF ({pid}, {pos}): {p['team_name']}")
-        if not p.get("purpose_labels"):
-            errors.append(f"[{source}] Vorschlag ohne Zweck-Label: {p['team_name']} {p['give_player_ids']}->{p['get_player_ids']}")
-        get_qb = [pid for pid in p["get_player_ids"] if (players.get(pid) or {}).get("position") == "QB"]
-        get_te = [pid for pid in p["get_player_ids"] if (players.get(pid) or {}).get("position") == "TE"]
+                errors.append(f"[{source}] Paket enthält K/DEF ({pid}, {pos}): {c['team_name']}")
+        get_qb = [pid for pid in c["get_player_ids"] if (players.get(pid) or {}).get("position") == "QB"]
+        get_te = [pid for pid in c["get_player_ids"] if (players.get(pid) or {}).get("position") == "TE"]
         if len(get_qb) > 1:
-            errors.append(f"[{source}] mehr als 1 QB im selben Trade erhalten: {p['give_player_ids']}->{p['get_player_ids']}")
+            errors.append(f"[{source}] mehr als 1 QB erhalten: {c['give_player_ids']}->{c['get_player_ids']}")
         if len(get_te) > 1:
-            errors.append(f"[{source}] mehr als 1 TE im selben Trade erhalten: {p['give_player_ids']}->{p['get_player_ids']}")
-
-    seen_combos = set()
-    for p in trade_finder_data.get("proposals", []):
-        check_proposal(p, "proposals")
-        key = (p["roster_id"], tuple(sorted(p["give_player_ids"])), tuple(sorted(p["get_player_ids"])))
+            errors.append(f"[{source}] mehr als 1 TE erhalten: {c['give_player_ids']}->{c['get_player_ids']}")
+        diff = c.get("value_diff_pct")
+        if diff is not None and diff > GAIN_CAP * 100 + 0.5:
+            errors.append(f"[{source}] Wertgewinn {diff}% überschreitet die 10%-Obergrenze: {c['give_player_ids']}->{c['get_player_ids']}")
+        key = (c["roster_id"], tuple(sorted(c["give_player_ids"])), tuple(sorted(c["get_player_ids"])), source)
         if key in seen_combos:
-            errors.append(f"Doppelter Vorschlag: {key}")
+            errors.append(f"Doppeltes Paket: {key}")
         seen_combos.add(key)
 
-    for pid, sections in trade_finder_data.get("block_player_candidates", {}).items():
-        for p in sections.get("section_a", []) + sections.get("section_b", []):
-            check_proposal(p, f"block_player_candidates[{pid}]")
+    for pid, entry in trade_finder_data.get("block_candidates", {}).items():
+        for fmt, lst in entry.get("by_format", {}).items():
+            for c in lst:
+                check(c, f"block_candidates[{pid}][{fmt}]")
 
-    for pid, tiers in trade_finder_data.get("target_offers", {}).items():
-        for p in tiers.values():
-            check_proposal(p, f"target_offers[{pid}]")
+    for pid, entry in trade_finder_data.get("target_candidates", {}).items():
+        for fmt, lst in entry.get("by_format", {}).items():
+            for c in lst:
+                check(c, f"target_candidates[{pid}][{fmt}]")
+
+    for idea_key, idea in trade_finder_data.get("ideas", {}).items():
+        for c in idea.get("items", []):
+            check(c, f"ideas[{idea_key}]")
+            if not c.get("anlass"):
+                errors.append(f"Trade-Idee ohne Anlass: ideas[{idea_key}] {c['give_player_ids']}->{c['get_player_ids']}")
 
     return errors

@@ -272,7 +272,7 @@ def main():
         sys.exit(1)
     log("Plausibilitätsprüfung bestanden.")
 
-    log("Prüfe Trade-Finder-Invarianten (kein K/DEF, jeder Vorschlag hat ein Zweck-Label, keine Duplikate) ...")
+    log("Prüfe Trade-Finder-Invarianten (kein K/DEF, Wert-/Sinn-Regeln, keine Duplikate, jede Idee hat einen Anlass) ...")
     tf_errors = tradefinder.validate_proposals(data["trade_finder"], data["players"])
     if tf_errors:
         log("FEHLER: Trade-Finder-Invarianten verletzt, Lauf wird verworfen:")
@@ -280,7 +280,15 @@ def main():
             log(f"  - {e}")
         log("docs/data.json und history.json werden NICHT verändert - die zuletzt veröffentlichte Version bleibt live.")
         sys.exit(1)
-    log(f"Trade-Finder-Invarianten bestanden ({len(data['trade_finder']['proposals'])} Vorschläge geprüft).")
+    tf = data["trade_finder"]
+    n_packages = sum(len(lst) for e in tf["block_candidates"].values() for lst in e["by_format"].values())
+    n_packages += sum(len(lst) for e in tf["target_candidates"].values() for lst in e["by_format"].values())
+    n_ideas = sum(len(idea["items"]) for idea in tf["ideas"].values())
+    log(
+        f"Trade-Finder-Invarianten bestanden ({n_packages} Pakete über "
+        f"{len(tf['block_candidates'])} Block-Spieler + {len(tf['target_candidates'])} Zielspieler geprüft, "
+        f"{n_ideas} Trade-Ideen, Suche {tf['build_seconds']}s)."
+    )
 
     log("Führe pytest-Testsuite aus ...")
     tests_dir = ROOT / "tests"

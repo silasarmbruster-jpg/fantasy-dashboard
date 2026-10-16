@@ -488,6 +488,11 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         # Restprogramm pro NFL-Team statt dupliziert pro Spieler (viele
         # Spieler teilen sich dasselbe Team) - Frontend merged über p.team.
         "team_schedules": rest_of_season,
+        # pos -> {team: rank} aus echten Saison-Fantasy-Punkten (Rang 1 =
+        # lässt am wenigsten zu = schwerstes Matchup) - Grundlage für die
+        # Playoff-Vorbereitung im Trade Finder (gilt für jede künftige
+        # Woche, da saisonweiter Durchschnitt, nicht wochenspezifisch).
+        "defense_position_ranks": defense_ranks,
     }
     data["waiver"] = waiver.compute(data, league_raw=league, my_roster_raw=my_roster_obj, raw_transactions=transactions or [])
     data["start_sit"] = startsit.compute(data)

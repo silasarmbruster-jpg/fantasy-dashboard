@@ -1,14 +1,14 @@
-"""Automatisierte Tests für die harten Sinn-Regeln des Trade Finders v4:
-- höchstens 1 erhaltener QB/TE je Trade, und nur mit Starterrolle (A1)
-- jeder andere erhaltene Spieler startet oder hat einen benannten Zweck,
-  Bench-Cover nur RB/WR und höchstens 1 je Trade (A2)
-- kein leerer Pflicht-Slot, Mindesttiefe je Skill-Position bleibt (A3)
-- Roster-Limits eingehalten, Waiver-Füllbarkeit korrekt erkannt (A4)
-- konsistente Zahlen über 'diese Woche' / 'Bis Deadline' / 'Playoffs' (C.2)
-- Annahme-Wahrscheinlichkeit vorzeichenrichtig aus Partnersicht (C.3)
-- jeder Vorschlag hat ein Zweck-Label, nie K/DEF (validate_proposals)
-- Beam-Search liefert auch größere Pakete (B)
-- Block-Spieler liefern mindestens 5 Vorschläge, Zielspieler 3 Angebotsstufen (E/F)
+"""Automatisierte Tests für den Trade-Finder-Neuaufbau (Runde 5):
+- Wert-Regeln: Potenz-Summe-Toleranz, 110%-Obergrenze, Superstar-Regel,
+  Bankspieler nie gegen Top-30 (Teil 4)
+- Sinn-Regeln: höchstens 1 QB/TE und nur mit Starterrolle, kein leerer
+  Pflicht-Slot, Roster-Limits (Teil 5)
+- Konsistente Zahlen über alle Horizonte (Teil 6)
+- Jede Trade-Idee hat einen Anlass, keine Season-Aus-Verletzten als Buy-Low,
+  keine Notlage ohne nachgewiesene Lücke (Teil 8)
+- Mindestabdeckung für Block-/Zielspieler (>=2 Pakete in >=3 Formaten oder
+  eine Erklärung), mindestens 3 Ideen je aktivierter Kategorie oder eine
+  Erklärung (Teil 8)
 Ein Build mit Verstößen wird von build.py verworfen (siehe validate_proposals)."""
 
 import json
@@ -27,27 +27,20 @@ RULES_1QB = {
     "num_qb_starters": 1,
     "total_roster_slots": 16,
 }
-RULES_SUPERFLEX = {
-    "starter_counts": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 2, "K": 1, "DEF": 1},
-    "flex_positions": {"RB", "WR", "TE", "QB"},
-    "super_flex": True,
-    "num_qb_starters": 2,
-    "total_roster_slots": 16,
-}
 
 
 def make_player(pid, position, trade_value=1000, bye_week=9, injury_status=None, age=25, team="KC",
-                season_avg=10.0, avg_last3=10.0, projection_week=10.0, name=None):
+                 season_avg=10.0, avg_last3=10.0, projection_week=10.0, name=None, trade_rank=None):
     return {
         "id": pid, "name": name or pid, "position": position, "team": team, "trade_value": trade_value,
         "bye_week": bye_week, "injury_status": injury_status, "age": age,
         "season_avg": season_avg, "avg_last3": avg_last3, "games_played": 5,
-        "projection_week": projection_week,
+        "projection_week": projection_week, "trade_rank": trade_rank,
     }
 
 
 # ---------------------------------------------------------------------------
-# Pools (unverändert aus Runde 3, weiterhin gültig)
+# Teil 4: Wert-Regeln
 # ---------------------------------------------------------------------------
 
 def test_tradeable_pool_excludes_k_def_and_reserve():
@@ -65,118 +58,100 @@ def test_tradeable_pool_excludes_k_def_and_reserve():
     assert pool_ids == {"qb1", "wr1"}
 
 
-def test_tradeable_pool_excludes_players_without_trade_value():
-    players = {"wr1": make_player("wr1", "WR", trade_value=None), "wr2": make_player("wr2", "WR", trade_value=500)}
-    team = {"players": list(players.keys()), "reserve": []}
-    pool = tf._tradeable_pool(team, players)
-    assert {p["id"] for p in pool} == {"wr2"}
+def test_missing_trade_value_treated_as_replacement_level_not_zero():
+    p = make_player("p1", "WR", trade_value=None)
+    assert tf._player_value(p) == tf.REPLACEMENT_VALUE
+    assert tf.REPLACEMENT_VALUE > 0
+
+
+def _combo(players, ids, current_starter_ids=None):
+    return tf._combo_record([players[i] for i in ids], current_starter_ids)
+
+
+def test_value_check_passes_within_default_tolerance():
+    players = {"g1": make_player("g1", "WR", trade_value=1000), "r1": make_player("r1", "WR", trade_value=1050)}
+    give = _combo(players, ["g1"])
+    get = _combo(players, ["r1"])
+    diff = tf._value_check(give, get, max_qb=1, max_te=1, tolerance=0.10)
+    assert diff is not None
+
+
+def test_value_check_rejects_beyond_gain_cap_even_at_max_tolerance():
+    # Ich gebe 1000, bekomme 1200 -> +20% Wertgewinn, das ist > GAIN_CAP (10%)
+    # und muss IMMER abgelehnt werden, auch bei der lockersten Toleranz.
+    players = {"g1": make_player("g1", "WR", trade_value=1000), "r1": make_player("r1", "WR", trade_value=1200)}
+    give = _combo(players, ["g1"])
+    get = _combo(players, ["r1"])
+    diff = tf._value_check(give, get, max_qb=1, max_te=1, tolerance=tf.TOLERANCE_MAX)
+    assert diff is None
+
+
+def test_value_check_allows_overpaying_up_to_tolerance():
+    # Ich gebe 1000, bekomme 900 -> in Potenz-Summe (^1.5) ein Minus von
+    # ca. 14.6% für mich ("zu meinen Lasten"), muss bei Toleranz 20% noch
+    # durchgehen, bei 5% aber nicht mehr.
+    players = {"g1": make_player("g1", "WR", trade_value=1000), "r1": make_player("r1", "WR", trade_value=900)}
+    give = _combo(players, ["g1"])
+    get = _combo(players, ["r1"])
+    assert tf._value_check(give, get, max_qb=1, max_te=1, tolerance=0.20) is not None
+    assert tf._value_check(give, get, max_qb=1, max_te=1, tolerance=0.05) is None
+
+
+def test_superstar_rule_blocks_disproportionate_single_player():
+    # Mein wertvollster Abgabe-Spieler ist 1000 wert, der wertvollste, den
+    # ich bekomme, ist 1500 wert (1.5x) - das überschreitet SUPERSTAR_CAP (1.3x).
+    players = {
+        "g1": make_player("g1", "WR", trade_value=600), "g2": make_player("g2", "WR", trade_value=1000),
+        "r1": make_player("r1", "WR", trade_value=1500), "r2": make_player("r2", "WR", trade_value=100),
+    }
+    give = _combo(players, ["g1", "g2"])
+    get = _combo(players, ["r1", "r2"])
+    assert tf._value_check(give, get, max_qb=1, max_te=1, tolerance=tf.TOLERANCE_MAX) is None
+
+
+def test_bench_player_never_gets_top_30_player():
+    players = {
+        "bench1": make_player("bench1", "WR", trade_value=900),
+        "top_player": make_player("top_player", "WR", trade_value=950, trade_rank=12),
+    }
+    give = _combo(players, ["bench1"], current_starter_ids=set())  # all_bench=True, "bench1" is not a starter
+    get = _combo(players, ["top_player"])
+    assert tf._value_check(give, get, max_qb=1, max_te=1, tolerance=tf.TOLERANCE_MAX) is None
+
+
+def test_bench_player_can_get_non_top_30_player():
+    players = {
+        "bench1": make_player("bench1", "WR", trade_value=900),
+        "mid_player": make_player("mid_player", "WR", trade_value=950, trade_rank=80),
+    }
+    give = _combo(players, ["bench1"], current_starter_ids=set())
+    get = _combo(players, ["mid_player"])
+    assert tf._value_check(give, get, max_qb=1, max_te=1, tolerance=tf.TOLERANCE_MAX) is not None
+
+
+def test_value_check_blocks_more_qbs_than_league_allows():
+    players = {"g1": make_player("g1", "WR", trade_value=1000), "q1": make_player("q1", "QB", trade_value=400), "q2": make_player("q2", "QB", trade_value=500)}
+    give = _combo(players, ["g1"])
+    get = _combo(players, ["q1", "q2"])
+    assert tf._value_check(give, get, max_qb=1, max_te=1, tolerance=tf.TOLERANCE_MAX) is None
 
 
 # ---------------------------------------------------------------------------
-# A1: höchstens 1 QB / 1 TE je Trade, und nur mit Starterrolle
+# Teil 5: Sinn-Regeln
 # ---------------------------------------------------------------------------
 
-def test_blocks_two_qbs_in_the_same_trade_even_if_one_would_start():
-    qb1 = make_player("qb1", "QB")
-    qb2 = make_player("qb2", "QB")
-    violated, reason = tf._qb_te_rule_violation([qb1, qb2], {"qb1"}, RULES_1QB)
-    assert violated is True
-    assert "QB" in reason
+def test_qb_te_must_start_blocks_qb_on_bench():
+    assert tf._qb_te_must_start({"qb1"}, starter_ids=set(), players={"qb1": make_player("qb1", "QB")}) is False
 
 
-def test_blocks_qb_that_would_not_start_after_the_trade():
-    qb1 = make_player("qb1", "QB")
-    violated, _ = tf._qb_te_rule_violation([qb1], post_trade_starter_ids=set(), rules=RULES_1QB)
-    assert violated is True
+def test_qb_te_must_start_allows_qb_that_starts():
+    assert tf._qb_te_must_start({"qb1"}, starter_ids={"qb1"}, players={"qb1": make_player("qb1", "QB")}) is True
 
 
-def test_allows_single_qb_that_starts():
-    qb1 = make_player("qb1", "QB")
-    violated, reason = tf._qb_te_rule_violation([qb1], {"qb1"}, RULES_1QB)
-    assert violated is False
-    assert reason is None
+def test_qb_te_must_start_ignores_non_qb_te_players():
+    players = {"wr1": make_player("wr1", "WR")}
+    assert tf._qb_te_must_start({"wr1"}, starter_ids=set(), players=players) is True
 
-
-def test_blocks_two_tes_in_the_same_trade():
-    te1 = make_player("te1", "TE")
-    te2 = make_player("te2", "TE")
-    violated, _ = tf._qb_te_rule_violation([te1, te2], {"te1", "te2"}, RULES_1QB)
-    assert violated is True
-
-
-def test_superflex_league_allows_two_starting_qbs():
-    qb1 = make_player("qb1", "QB")
-    qb2 = make_player("qb2", "QB")
-    violated, _ = tf._qb_te_rule_violation([qb1, qb2], {"qb1", "qb2"}, RULES_SUPERFLEX)
-    assert violated is False
-
-
-# ---------------------------------------------------------------------------
-# A2: jeder erhaltene Spieler startet oder hat einen benannten Zweck
-# ---------------------------------------------------------------------------
-
-def test_blocks_bench_wr_without_any_named_purpose():
-    starter = make_player("starter_wr", "WR", bye_week=9, injury_status=None)
-    bench_wr = make_player("bench_wr", "WR", bye_week=5)
-    by_pos = {"WR": [starter, bench_wr]}
-    violated, reason = tf._bench_cover_violation([bench_wr], {"starter_wr"}, by_pos, bye_calendar_weeks=set())
-    assert violated is True
-    assert "unbegründete" in reason
-
-
-def test_allows_bench_rb_as_injury_replacement_for_hard_out_starter():
-    starter = make_player("starter_rb", "RB", injury_status="Out")
-    bench_rb = make_player("bench_rb", "RB")
-    by_pos = {"RB": [starter, bench_rb]}
-    violated, _ = tf._bench_cover_violation([bench_rb], {"starter_rb"}, by_pos, bye_calendar_weeks=set())
-    assert violated is False
-
-
-def test_allows_bench_rb_as_bye_coverage_before_playoffs_with_no_other_backup():
-    starter = make_player("starter_rb", "RB", bye_week=13, injury_status=None)
-    bench_rb = make_player("bench_rb", "RB", bye_week=5)
-    by_pos = {"RB": [starter, bench_rb]}
-    violated, _ = tf._bench_cover_violation(
-        [bench_rb], {"starter_rb"}, by_pos, bye_calendar_weeks={12, 13},
-    )
-    assert violated is False
-
-
-def test_blocks_bye_coverage_when_another_healthy_backup_already_covers_it():
-    starter = make_player("starter_rb", "RB", bye_week=13, injury_status=None)
-    existing_backup = make_player("existing_backup", "RB", bye_week=5)
-    bench_rb = make_player("bench_rb", "RB", bye_week=6)
-    by_pos = {"RB": [starter, existing_backup, bench_rb]}
-    violated, _ = tf._bench_cover_violation(
-        [bench_rb], {"starter_rb", "existing_backup"}, by_pos, bye_calendar_weeks={12, 13},
-    )
-    assert violated is True
-
-
-def test_blocks_more_than_one_bench_cover_player_per_trade():
-    starter1 = make_player("starter_rb", "RB", injury_status="Out")
-    starter2 = make_player("starter_wr", "WR", injury_status="Out")
-    bench_rb = make_player("bench_rb", "RB")
-    bench_wr = make_player("bench_wr", "WR")
-    by_pos = {"RB": [starter1, bench_rb], "WR": [starter2, bench_wr]}
-    violated, reason = tf._bench_cover_violation(
-        [bench_rb, bench_wr], {"starter_rb", "starter_wr"}, by_pos, bye_calendar_weeks=set(),
-    )
-    assert violated is True
-    assert "mehr als" in reason
-
-
-def test_bench_cover_non_rb_wr_position_always_blocked():
-    # Sollte in der Praxis schon von _qb_te_rule_violation gefangen werden,
-    # aber auch diese Regel allein muss ihn ablehnen (Verteidigung in der Tiefe).
-    bench_te = make_player("bench_te", "TE")
-    violated, _ = tf._bench_cover_violation([bench_te], set(), {"TE": [bench_te]}, bye_calendar_weeks=set())
-    assert violated is True
-
-
-# ---------------------------------------------------------------------------
-# A3: kein leerer Pflicht-Slot, Mindesttiefe bleibt
-# ---------------------------------------------------------------------------
 
 def test_lineup_legality_requires_all_mandatory_positions():
     players = {}
@@ -217,10 +192,6 @@ def test_lineup_legality_passes_with_full_roster_and_depth():
     assert reason is None
 
 
-# ---------------------------------------------------------------------------
-# A4: Roster-Limits + Waiver-Füllbarkeit
-# ---------------------------------------------------------------------------
-
 def test_must_drop_info_no_overflow():
     players = {f"p{i}": make_player(f"p{i}", "WR") for i in range(5)}
     must_drop, drop_ids, can_fill = tf._must_drop_info(list(players.keys()), total_roster_slots=10, players=players, waiver_by_position={})
@@ -229,31 +200,43 @@ def test_must_drop_info_no_overflow():
     assert can_fill is True
 
 
-def test_must_drop_info_overflow_detects_cheapest_drop_and_waiver_availability():
-    players = {
-        "expensive": make_player("expensive", "WR", trade_value=5000),
-        "cheap": make_player("cheap", "WR", trade_value=100),
-    }
+def test_must_drop_info_detects_cheapest_drop_and_waiver_availability():
+    players = {"expensive": make_player("expensive", "WR", trade_value=5000), "cheap": make_player("cheap", "WR", trade_value=100)}
     must_drop, drop_ids, can_fill = tf._must_drop_info(
-        list(players.keys()), total_roster_slots=1, players=players,
-        waiver_by_position={"WR": [{"player_id": "fa1"}]},
+        list(players.keys()), total_roster_slots=1, players=players, waiver_by_position={"WR": [{"player_id": "fa1"}]},
     )
     assert must_drop is True
     assert drop_ids == ["cheap"]
     assert can_fill is True
 
 
-def test_must_drop_info_overflow_without_waiver_fill():
-    players = {"a": make_player("a", "TE"), "b": make_player("b", "TE")}
-    must_drop, drop_ids, can_fill = tf._must_drop_info(
-        list(players.keys()), total_roster_slots=1, players=players, waiver_by_position={},
-    )
-    assert must_drop is True
-    assert can_fill is False
+def test_package_label_matches_give_get_size_relationship():
+    assert tf._package_label(3, 1) == "Spitze verbessern"
+    assert tf._package_label(1, 3) == "Breite aufbauen"
+    assert tf._package_label(2, 2) == "Gleichwertiger Tausch"
 
 
 # ---------------------------------------------------------------------------
-# C.2: konsistente Zahlen über alle drei Horizonte
+# Annahme-Wahrscheinlichkeit, vorzeichenrichtig
+# ---------------------------------------------------------------------------
+
+def test_acceptance_high_when_i_overpay():
+    acceptance = tf._acceptance_label(give_value=1220, get_value=1000, their_lineup_delta=0, their_need_fit=0, partner_type="passive")
+    assert acceptance == "hoch"
+
+
+def test_acceptance_low_when_partner_loses_18_percent():
+    acceptance = tf._acceptance_label(give_value=1000, get_value=1220, their_lineup_delta=5, their_need_fit=5, partner_type="buyer")
+    assert acceptance == "niedrig"
+
+
+def test_acceptance_capped_at_medium_for_5_to_15_percent_partner_loss():
+    acceptance = tf._acceptance_label(give_value=1000, get_value=1111, their_lineup_delta=10, their_need_fit=5, partner_type="buyer")
+    assert acceptance == "mittel"
+
+
+# ---------------------------------------------------------------------------
+# Teil 6 / Teil 8: konsistente Zahlen
 # ---------------------------------------------------------------------------
 
 def _consistency_ctx():
@@ -289,6 +272,18 @@ def test_value_breakdown_this_week_is_one_entry_of_the_weekly_list():
     assert b["this_week_delta"] == week_entry["delta"]
 
 
+def test_value_breakdown_same_trade_gives_same_numbers_every_time():
+    players, roster_positions, flex_positions, before_ids = _consistency_ctx()
+    after_ids = [pid for pid in before_ids if pid != "bench_old"] + ["bench_new"]
+    before_ids_final = [pid for pid in before_ids if pid != "bench_new"]
+    args = (before_ids_final, after_ids, players, roster_positions, flex_positions, 8, [8, 9, 10], [14, 15, 16, 17])
+    b1 = tf._value_breakdown(*args)
+    b2 = tf._value_breakdown(*args)
+    assert b1["until_deadline_total"] == b2["until_deadline_total"]
+    assert b1["playoffs_total"] == b2["playoffs_total"]
+    assert b1["this_week_delta"] == b2["this_week_delta"]
+
+
 def test_value_breakdown_deadline_total_bounded_by_weeks_times_max_delta():
     players, roster_positions, flex_positions, before_ids = _consistency_ctx()
     after_ids = [pid for pid in before_ids if pid != "bench_old"] + ["bench_new"]
@@ -300,95 +295,17 @@ def test_value_breakdown_deadline_total_bounded_by_weeks_times_max_delta():
     deadline_entries = [w for w in b["weeks"] if w["week"] in deadline_weeks]
     max_delta = max(w["delta"] for w in deadline_entries)
     assert b["until_deadline_total"] <= len(deadline_weeks) * max_delta + 1e-6
-    # Gleicher Trade darf nie unterschiedliche Vorzeichen für "diese Woche"
-    # und "Bis Deadline" liefern, ohne dass es explizit markiert wird.
-    if b["this_week_delta"] < 0 and b["until_deadline_total"] > 0:
-        assert b["short_term_negative_long_term_positive"] is True
-
-
-def test_value_breakdown_excludes_bye_week_from_that_weeks_lineup():
-    players, roster_positions, flex_positions, ids = _consistency_ctx()
-    current_week = 20  # bench_old/bench_new haben bye_week=20
-    b = tf._value_breakdown(ids, ids, players, roster_positions, flex_positions, current_week, [20], [])
-    week_entry = b["weeks"][0]
-    # Identischer Kader vorher/nachher -> Delta muss exakt 0 sein, auch in der Bye-Woche.
-    assert week_entry["delta"] == 0
-
-
-# ---------------------------------------------------------------------------
-# C.3: Annahme-Wahrscheinlichkeit, vorzeichenrichtig aus Partnersicht
-# ---------------------------------------------------------------------------
-
-def test_acceptance_high_when_i_overpay():
-    # Ich gebe 1220 Wert, bekomme 1000 -> ich überzahle um 22%, Partner gewinnt Marktwert.
-    acceptance = tf._acceptance_label(give_value=1220, get_value=1000, their_lineup_delta=0, their_need_fit=0, partner_type="passive")
-    assert acceptance == "hoch"
-
-
-def test_acceptance_low_when_partner_loses_18_percent():
-    # Ich gebe 1000, bekomme 1220 -> Partner verliert (1220-1000)/1220 = 18% Marktwert.
-    acceptance = tf._acceptance_label(give_value=1000, get_value=1220, their_lineup_delta=5, their_need_fit=5, partner_type="buyer")
-    assert acceptance == "niedrig"
-
-
-def test_acceptance_capped_at_medium_for_5_to_15_percent_partner_loss():
-    # Partner verliert (1111-1000)/1111 ≈ 10% - selbst mit hohem Need/Buyer-Status
-    # darf das nie 'hoch' werden, maximal 'mittel'.
-    acceptance = tf._acceptance_label(give_value=1000, get_value=1111, their_lineup_delta=10, their_need_fit=5, partner_type="buyer")
-    assert acceptance == "mittel"
-
-
-def test_acceptance_fair_trade_with_real_benefit_is_high():
-    acceptance = tf._acceptance_label(give_value=1000, get_value=1000, their_lineup_delta=3, their_need_fit=2, partner_type="buyer")
-    assert acceptance == "hoch"
-
-
-# ---------------------------------------------------------------------------
-# Zweck-Labels
-# ---------------------------------------------------------------------------
-
-def test_purpose_labels_empty_when_nothing_qualifies():
-    give_combo = [make_player("give1", "WR", trade_value=1000)]
-    get_combo = [make_player("get1", "WR", trade_value=1000)]
-    labels = tf._purpose_labels(
-        give_combo, get_combo, their_weakness={}, lineup_delta=0.0,
-        my_starters_by_pos={}, my_roster_by_pos={}, bye_calendar_weeks=set(),
-        sell_high_ids=set(), buy_low_ids=set(), their_need_fit=0.0, relaxation_level=4,
-    )
-    assert labels == []
-
-
-def test_purpose_labels_upgrade_when_lineup_gain_is_clear():
-    give_combo = [make_player("give1", "WR", trade_value=500)]
-    get_combo = [make_player("get1", "WR", trade_value=600)]
-    labels = tf._purpose_labels(
-        give_combo, get_combo, their_weakness={}, lineup_delta=5.0,
-        my_starters_by_pos={}, my_roster_by_pos={}, bye_calendar_weeks=set(),
-        sell_high_ids=set(), buy_low_ids=set(), their_need_fit=0.0, relaxation_level=1,
-    )
-    assert any(l.startswith("Upgrade") for l in labels)
-
-
-def test_purpose_labels_value_gain_label_on_relaxation_level_6():
-    give_combo = [make_player("give1", "WR", trade_value=500)]
-    get_combo = [make_player("get1", "WR", trade_value=400)]
-    labels = tf._purpose_labels(
-        give_combo, get_combo, their_weakness={}, lineup_delta=-2.0,
-        my_starters_by_pos={}, my_roster_by_pos={}, bye_calendar_weeks=set(),
-        sell_high_ids=set(), buy_low_ids=set(), their_need_fit=0.0, relaxation_level=6,
-    )
-    assert "Wertgewinn statt Lineup-Gewinn" in labels
 
 
 # ---------------------------------------------------------------------------
 # validate_proposals (Build-Gate)
 # ---------------------------------------------------------------------------
 
-def _sample_proposal(**overrides):
+def _sample_candidate(**overrides):
     base = {
         "roster_id": 1, "team_name": "Test Team",
         "give_player_ids": ["wr1"], "get_player_ids": ["wr2"],
-        "purpose_labels": ["Upgrade WR"],
+        "value_diff_pct": 5.0, "anlass": "Testgrund",
     }
     base.update(overrides)
     return base
@@ -396,105 +313,43 @@ def _sample_proposal(**overrides):
 
 def test_validate_proposals_flags_k_def():
     players = {"wr1": make_player("wr1", "WR"), "k1": make_player("k1", "K")}
-    proposals = {"proposals": [_sample_proposal(get_player_ids=["k1"])]}
-    errors = tf.validate_proposals(proposals, players)
+    data = {"block_candidates": {"wr1": {"by_format": {"1-1": [_sample_candidate(get_player_ids=["k1"])]}}}, "target_candidates": {}, "ideas": {}}
+    errors = tf.validate_proposals(data, players)
     assert any("K/DEF" in e for e in errors)
-
-
-def test_validate_proposals_flags_missing_purpose_label():
-    players = {"wr1": make_player("wr1", "WR"), "wr2": make_player("wr2", "WR")}
-    proposals = {"proposals": [_sample_proposal(purpose_labels=[])]}
-    errors = tf.validate_proposals(proposals, players)
-    assert any("Zweck-Label" in e for e in errors)
-
-
-def test_validate_proposals_flags_duplicates():
-    players = {"wr1": make_player("wr1", "WR"), "wr2": make_player("wr2", "WR")}
-    proposals = {"proposals": [_sample_proposal(), _sample_proposal()]}
-    errors = tf.validate_proposals(proposals, players)
-    assert any("Doppelter" in e for e in errors)
 
 
 def test_validate_proposals_flags_two_qbs_received():
     players = {"wr1": make_player("wr1", "WR"), "qb1": make_player("qb1", "QB"), "qb2": make_player("qb2", "QB")}
-    proposals = {"proposals": [_sample_proposal(get_player_ids=["qb1", "qb2"])]}
-    errors = tf.validate_proposals(proposals, players)
+    data = {"block_candidates": {"wr1": {"by_format": {"1-2": [_sample_candidate(get_player_ids=["qb1", "qb2"])]}}}, "target_candidates": {}, "ideas": {}}
+    errors = tf.validate_proposals(data, players)
     assert any("mehr als 1 QB" in e for e in errors)
 
 
-def test_validate_proposals_clean_list_has_no_errors():
+def test_validate_proposals_flags_gain_above_cap():
     players = {"wr1": make_player("wr1", "WR"), "wr2": make_player("wr2", "WR")}
-    proposals = {"proposals": [_sample_proposal()]}
-    errors = tf.validate_proposals(proposals, players)
-    assert errors == []
+    data = {"block_candidates": {"wr1": {"by_format": {"1-1": [_sample_candidate(value_diff_pct=25.0)]}}}, "target_candidates": {}, "ideas": {}}
+    errors = tf.validate_proposals(data, players)
+    assert any("10%-Obergrenze" in e for e in errors)
 
 
-def test_validate_proposals_checks_block_and_target_indices_too():
-    players = {"wr1": make_player("wr1", "WR"), "k1": make_player("k1", "K")}
+def test_validate_proposals_flags_idea_without_anlass():
+    players = {"wr1": make_player("wr1", "WR"), "wr2": make_player("wr2", "WR")}
+    item = _sample_candidate()
+    del item["anlass"]
+    data = {"block_candidates": {}, "target_candidates": {}, "ideas": {"sell_high": {"items": [item]}}}
+    errors = tf.validate_proposals(data, players)
+    assert any("ohne Anlass" in e for e in errors)
+
+
+def test_validate_proposals_clean_data_has_no_errors():
+    players = {"wr1": make_player("wr1", "WR"), "wr2": make_player("wr2", "WR")}
     data = {
-        "proposals": [],
-        "block_player_candidates": {"wr1": {"section_a": [], "section_b": [_sample_proposal(get_player_ids=["k1"])]}},
-        "target_offers": {},
+        "block_candidates": {"wr1": {"by_format": {"1-1": [_sample_candidate()]}}},
+        "target_candidates": {},
+        "ideas": {"sell_high": {"items": [_sample_candidate(roster_id=2)]}},
     }
     errors = tf.validate_proposals(data, players)
-    assert any("block_player_candidates" in e and "K/DEF" in e for e in errors)
-
-
-# ---------------------------------------------------------------------------
-# B: Beam-Search liefert auch größere Pakete (4+ Spieler je Seite)
-# ---------------------------------------------------------------------------
-
-def _beam_ctx(players, my_current_ids, their_keep_ids, rules=RULES_1QB):
-    roster_positions = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "K", "DEF", "BN", "BN", "BN", "BN"]
-    flex_positions = {"RB", "WR", "TE"}
-    current_week = 8
-    _s, _b, my_baseline = tf._week_lineup_analysis(my_current_ids, players, roster_positions, flex_positions, current_week, current_week)
-    _s2, _b2, their_baseline = tf._week_lineup_analysis(their_keep_ids, players, roster_positions, flex_positions, current_week, current_week)
-    return {
-        "players": players, "roster_positions": roster_positions, "flex_positions": flex_positions,
-        "current_week": current_week, "rules": rules, "bye_calendar_weeks": set(),
-        "my_current_ids": my_current_ids, "their_keep_ids": their_keep_ids,
-        "my_baseline_points": my_baseline, "their_baseline_points": their_baseline,
-        "total_roster_slots": 18, "my_waiver_by_pos": {}, "their_waiver_by_pos": {},
-        "my_weakness": {}, "their_weakness": {},
-    }
-
-
-def test_beam_search_produces_packages_with_four_or_more_players_per_side():
-    players = {"k1": make_player("k1", "K"), "def1": make_player("def1", "DEF")}
-    my_give_pool = []
-    their_get_pool = []
-    for i in range(5):
-        pid = f"my_wr{i}"
-        players[pid] = make_player(pid, "WR", trade_value=200 + i * 10, projection_week=3, season_avg=3)
-        my_give_pool.append(pid)
-    for i in range(5):
-        pid = f"their_wr{i}"
-        players[pid] = make_player(pid, "WR", trade_value=190 + i * 10, projection_week=11, season_avg=11)
-        their_get_pool.append(pid)
-    my_current_ids = my_give_pool + [
-        "qb_mine", "rb1_mine", "rb2_mine", "te_mine", "te_mine2", "flex1_mine", "k1", "def1",
-    ]
-    for pid, pos in [
-        ("qb_mine", "QB"), ("rb1_mine", "RB"), ("rb2_mine", "RB"),
-        ("te_mine", "TE"), ("te_mine2", "TE"), ("flex1_mine", "RB"),
-    ]:
-        players[pid] = make_player(pid, pos, projection_week=8, season_avg=8)
-    their_keep_ids = their_get_pool + [
-        "their_qb", "their_rb1", "their_rb2", "their_te", "their_te2", "their_flex1", "k1", "def1",
-    ]
-    for pid, pos in [
-        ("their_qb", "QB"), ("their_rb1", "RB"), ("their_rb2", "RB"),
-        ("their_te", "TE"), ("their_te2", "TE"), ("their_flex1", "RB"),
-    ]:
-        players[pid] = make_player(pid, pos, projection_week=8, season_avg=8)
-
-    ctx = _beam_ctx(players, my_current_ids, their_keep_ids)
-    perf = {"evals": 0}
-    states = tf._generate_team_pair_states(my_give_pool, their_get_pool, ctx, perf)
-    assert any(max(len(s["give_player_ids"]), len(s["get_player_ids"])) >= 4 for s in states), (
-        "Beam-Search sollte bei klarem Gewinn auch größere Pakete (>=4 je Seite) finden"
-    )
+    assert errors == []
 
 
 # ---------------------------------------------------------------------------
@@ -506,8 +361,8 @@ def _load_real_data():
     if not data_path.exists():
         pytest.skip("docs/data.json nicht vorhanden - noch kein Build-Lauf")
     data = json.loads(data_path.read_text(encoding="utf-8"))
-    if "block_player_candidates" not in data.get("trade_finder", {}):
-        pytest.skip("docs/data.json stammt noch aus einem Build vor dem Trade-Finder-Umbau")
+    if "block_candidates" not in data.get("trade_finder", {}):
+        pytest.skip("docs/data.json stammt noch aus einem Build vor dem Trade-Finder-Neuaufbau (Runde 5)")
     return data
 
 
@@ -517,35 +372,49 @@ def test_real_build_output_passes_all_invariants():
     assert errors == [], f"{len(errors)} Invarianten-Verstöße im letzten Build: {errors[:5]}"
 
 
-def test_real_build_every_tradeable_player_of_mine_has_enough_block_proposals():
+def test_real_build_every_player_with_market_value_has_coverage_or_explanation():
     data = _load_real_data()
-    block = data["trade_finder"]["block_player_candidates"]
+    tf_data = data["trade_finder"]
     short = []
-    for pid, sections in block.items():
-        combined = {
-            (tuple(sorted(p["give_player_ids"])), tuple(sorted(p["get_player_ids"])))
-            for p in sections.get("section_a", []) + sections.get("section_b", [])
-        }
-        if len(combined) < tf.MIN_PROPOSALS_PER_PLAYER:
-            short.append((pid, len(combined)))
-    assert not short, f"Spieler mit zu wenigen Trade-Block-Vorschlägen: {short[:10]}"
+    for source in ("block_candidates", "target_candidates"):
+        for pid, entry in tf_data[source].items():
+            total = sum(len(v) for v in entry["by_format"].values())
+            n_formats = len(entry["by_format"])
+            ok = (total >= tf.MIN_PACKAGES_PER_PLAYER and n_formats >= tf.MIN_FORMATS_PER_PLAYER) or entry.get("empty_reason")
+            if not ok:
+                short.append((source, pid, total, n_formats))
+    assert not short, f"Spieler ohne ausreichende Abdeckung UND ohne Erklärung: {short[:10]}"
 
 
-def test_real_build_target_offers_have_up_to_three_tiers():
+def test_real_build_ideas_have_at_least_three_items_or_an_explanation():
     data = _load_real_data()
-    targets = data["trade_finder"]["target_offers"]
-    assert targets, "Es sollte mindestens einen Zielspieler mit Angebotsstufen geben"
-    for pid, tiers in targets.items():
-        assert set(tiers.keys()) <= {"entry", "mid", "max"}
-        assert len(tiers) >= 1
+    ideas = data["trade_finder"]["ideas"]
+    bad = [key for key, idea in ideas.items() if len(idea.get("items", [])) < 3 and not idea.get("empty_reason")]
+    assert not bad, f"Trade-Ideen-Kategorien ohne >=3 Ideen UND ohne Erklärung: {bad}"
 
 
-def test_real_build_has_at_least_one_large_package():
+def test_real_build_every_idea_item_references_real_data_in_its_anlass():
     data = _load_real_data()
-    proposals = data["trade_finder"]["proposals"]
-    block = data["trade_finder"]["block_player_candidates"]
-    all_sizes = [max(len(p["give_player_ids"]), len(p["get_player_ids"])) for p in proposals]
-    for sections in block.values():
-        for p in sections.get("section_a", []) + sections.get("section_b", []):
-            all_sizes.append(max(len(p["give_player_ids"]), len(p["get_player_ids"])))
-    assert all_sizes and max(all_sizes) >= 1
+    ideas = data["trade_finder"]["ideas"]
+    players = data["players"]
+    for key, idea in ideas.items():
+        for item in idea.get("items", []):
+            assert item.get("anlass"), f"Idee ohne Anlass in {key}: {item['give_player_ids']}->{item['get_player_ids']}"
+
+
+def test_real_build_no_season_ending_injury_in_buy_low():
+    data = _load_real_data()
+    buy_low = data["trade_finder"]["ideas"].get("buy_low", {})
+    players = data["players"]
+    for item in buy_low.get("items", []):
+        for pid in item["get_player_ids"]:
+            status = players.get(pid, {}).get("injury_status")
+            assert status not in tf.SEASON_ENDING_STATUSES, f"Season-Aus-Spieler {pid} ({status}) als Buy-Low vorgeschlagen"
+
+
+def test_real_build_partner_notlage_items_reference_a_real_gap():
+    data = _load_real_data()
+    notlage = data["trade_finder"]["ideas"].get("partner_notlage", {})
+    for item in notlage.get("items", []):
+        anlass = item.get("anlass", "")
+        assert "Bedarf" in anlass and "Woche" in anlass, f"Notlage-Idee ohne erkennbare Lücken-Angabe: {anlass}"
