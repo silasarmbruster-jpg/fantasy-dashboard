@@ -738,6 +738,7 @@
     { key: "season_total", label: "Punkte", sortable: true },
     { key: "season_avg", label: "Ø", sortable: true },
     { key: "targets_pg", label: "Targets/Sp.", sortable: true },
+    { key: "target_share", label: "Tgt-Share", sortable: true },
     { key: "snap_pct", label: "Snap %", sortable: true },
     { key: "touches_pg", label: "Touches/Sp.", sortable: true },
     { key: "redzone_pg", label: "RZ/Sp.", sortable: true },
@@ -807,6 +808,7 @@
         el("td", {}, fmt1(p.season_total)),
         el("td", {}, fmt1(p.season_avg)),
         el("td", {}, fmt1(p.targets_pg)),
+        el("td", {}, p.target_share != null ? `${p.target_share}%` : "–"),
         el("td", {}, p.snap_pct ? `${p.snap_pct}%` : "–"),
         el("td", {}, fmt1(p.touches_pg)),
         el("td", {}, fmt1(p.redzone_pg)),
@@ -1364,35 +1366,52 @@
   }
 
   // ---------- Start/Sit ----------
+  const CONFIDENCE_COLORS = { hoch: "var(--status-good)", mittel: "var(--status-warn)", niedrig: "var(--text-faint)" };
+
+  function renderDuelSummary(duel) {
+    if (!duel) return null;
+    const color = duel.stance === "favorit" ? "var(--status-good)" : duel.stance === "underdog" ? "var(--status-bad)" : "var(--status-warn)";
+    return el("div", { class: "card", style: `border-left:4px solid ${color};` }, [
+      el("div", { style: "font-weight:700;font-size:13px;margin-bottom:4px;" }, `${duel.win_probability_me}% Sieg-Chance diese Woche (${duel.stance === "favorit" ? "Favorit" : duel.stance === "underdog" ? "Underdog" : "ausgeglichen"})`),
+      el("div", { style: "font-size:12.5px;color:var(--text-muted);" }, duel.advice),
+    ]);
+  }
+
+  function renderSlotCard(s, isChanged) {
+    const p = s.player_id ? DATA.players[s.player_id] : null;
+    if (!p) {
+      return el("div", { class: "card", style: "margin-bottom:10px;" }, [el("span", { class: "slot-tag" }, s.slot), " – Slot nicht besetzt."]);
+    }
+    const st = statusInfo(p);
+    return el("div", { class: "card", style: `margin-bottom:10px;${isChanged ? "border-left:4px solid var(--accent);" : ""}` }, [
+      el("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;" }, [
+        el("div", { style: "display:flex;align-items:center;gap:10px;" }, [
+          el("span", { class: "slot-tag", style: "width:auto;" }, s.slot),
+          playerAvatar(p, "sm"),
+          el("div", {}, [
+            el("div", { style: "font-weight:700;font-size:14px;" }, [p.name, el("span", { class: `status-dot ${st.cls}`, style: "margin-left:6px;" })]),
+            el("div", { class: "pc-meta" }, [posChip(p.position), ` ${p.team || "FA"}`, isChanged ? el("span", { style: "color:var(--accent);font-weight:700;margin-left:6px;" }, "NEU") : null].filter(Boolean)),
+          ]),
+        ]),
+        el("div", { style: "text-align:right;" }, [el("div", { style: "font-size:18px;font-weight:800;" }, fmt1(s.effective_projection)), el("div", { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;" }, "Proj.")]),
+      ]),
+      s.reasons && s.reasons.length
+        ? el("ul", { style: "margin:10px 0 0;padding-left:18px;font-size:12px;color:var(--text-muted);" }, s.reasons.map((r) => el("li", {}, r)))
+        : null,
+    ].filter(Boolean));
+  }
+
   function renderStartSit() {
     const frag = el("div", {});
     frag.appendChild(renderHeader());
 
     const ss = DATA.start_sit;
+    const duelCard = renderDuelSummary(ss.duel_summary);
+    if (duelCard) frag.appendChild(duelCard);
 
     frag.appendChild(el("div", { class: "section-label" }, "Empfohlenes Lineup"));
-    const rows = ss.recommended_slots.map((s) => {
-      const p = s.player_id ? DATA.players[s.player_id] : null;
-      if (!p) {
-        return el("tr", {}, [el("td", {}, el("span", { class: "slot-tag" }, s.slot)), el("td", { colspan: "3" }, "–")]);
-      }
-      const st = statusInfo(p);
-      const changed = (ss.decisions || []).some((d) => d.recommended_player_id === p.id);
-      return el("tr", { style: changed ? "background:var(--accent-soft);" : "" }, [
-        el("td", {}, el("span", { class: "slot-tag" }, s.slot)),
-        el("td", {}, [playerTag(p.id), changed ? el("span", { style: "color:var(--accent);font-size:11px;margin-left:6px;", title: "Wechsel empfohlen" }, "NEU") : null].filter(Boolean)),
-        el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), ` ${p.team || "FA"} · ${p.matchup_opponent ? "vs " + p.matchup_opponent : ""}`]),
-        el("td", {}, fmt1(s.effective_projection)),
-      ]);
-    });
-    frag.appendChild(
-      el("div", { class: "card table-wrap" }, [
-        el("table", { class: "lineup-table" }, [
-          el("thead", {}, el("tr", {}, [el("th", {}, "Slot"), el("th", {}, "Spieler"), el("th", {}, "Team/Gegner"), el("th", {}, "Proj.")])),
-          el("tbody", {}, rows),
-        ]),
-      ])
-    );
+    const changedIds = new Set((ss.decisions || []).map((d) => d.recommended_player_id));
+    ss.recommended_slots.forEach((s) => frag.appendChild(renderSlotCard(s, s.player_id && changedIds.has(s.player_id))));
 
     frag.appendChild(el("div", { class: "section-label" }, "Entscheidungen"));
     const decisions = ss.decisions || [];
@@ -1410,7 +1429,10 @@
                 el("span", { style: "color:var(--text-faint);" }, "→"),
                 playerTag(rec.id),
               ]),
-              el("div", { style: `font-weight:800;color:${d.delta >= 0 ? "var(--status-good)" : "var(--status-bad)"};` }, `${d.delta >= 0 ? "+" : ""}${d.delta} Pkt.`),
+              el("div", { style: "text-align:right;" }, [
+                el("div", { style: `font-weight:800;color:${d.delta >= 0 ? "var(--status-good)" : "var(--status-bad)"};` }, `${d.delta >= 0 ? "+" : ""}${d.delta} Pkt.`),
+                el("div", { style: `font-size:10.5px;font-weight:700;color:${CONFIDENCE_COLORS[d.confidence] || "var(--text-muted)"};text-transform:uppercase;` }, `Konfidenz: ${d.confidence}`),
+              ]),
             ]),
             el(
               "ul",
@@ -1458,7 +1480,12 @@
     if (!p) return null;
     const st = statusInfo(p);
     const drop = entry.drop_candidate_id ? DATA.players[entry.drop_candidate_id] : null;
-    const usage = p.position === "RB" ? `${fmt1(p.touches_pg)} Touches/Sp.` : ["WR", "TE"].includes(p.position) ? `${fmt1(p.targets_pg)} Targets/Sp.` : null;
+    const usage =
+      p.position === "RB"
+        ? `${fmt1(p.touches_pg)} Touches/Sp.${p.rush_share != null ? ` · ${p.rush_share}% Rushing Share` : ""}`
+        : ["WR", "TE"].includes(p.position)
+        ? `${fmt1(p.targets_pg)} Targets/Sp.${p.target_share != null ? ` · ${p.target_share}% Target Share` : ""}`
+        : null;
 
     const card = el("div", { class: "player-card", style: "flex-wrap:wrap;align-items:flex-start;cursor:default;" }, [
       el("div", { style: "display:flex;gap:12px;align-items:center;cursor:pointer;", onclick: () => openPlayerDetail(p.id) }, [
@@ -1716,13 +1743,19 @@
       ])
     );
     panel.appendChild(
-      el("div", { style: "margin-top:10px;display:flex;align-items:center;gap:8px;" }, [
+      el("div", { style: "margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;" }, [
         el("span", { class: `status-dot ${st.cls}` }),
         el("span", {}, st.label),
         el("span", { style: "color:var(--text-faint);" }, "·"),
         el("span", {}, teamAvailability(p)),
       ])
     );
+    if (p.injury_status) {
+      const injuryText =
+        (p.injury_body_part ? `Verletzung: ${p.injury_body_part} · ` : "") +
+        (p.practice_description ? `Training: ${p.practice_description}` : "Keine Trainingsstatus-Daten verfügbar");
+      panel.appendChild(el("div", { style: "font-size:11.5px;color:var(--text-muted);margin-top:4px;" }, injuryText));
+    }
 
     const statGrid = el("div", { class: "grid grid-3", style: "margin-top:14px;" }, [
       statTile("Projektion", fmt1(p.projection_week)),
@@ -1735,21 +1768,35 @@
     panel.appendChild(statGrid);
 
     if (["QB", "RB", "WR", "TE"].includes(p.position)) {
-      panel.appendChild(el("div", { class: "section-label" }, "Usage (Ø pro Spiel)"));
-      panel.appendChild(
-        el("div", { class: "grid grid-3" }, [
-          statTile("Targets", fmt1(p.targets_pg)),
-          statTile("Snap %", p.snap_pct ? `${p.snap_pct}%` : "–"),
-          statTile("Touches", fmt1(p.touches_pg)),
-          statTile("Red-Zone", fmt1(p.redzone_pg)),
-          statTile("Air Yards", p.air_yards ? fmtInt(p.air_yards / Math.max(1, p.games_played)) : "–"),
-          statTile("Spiele", p.games_played ?? "–"),
-        ])
+      const usageTiles = [];
+      if (p.position === "RB") {
+        usageTiles.push(statTile("Rushing Share", p.rush_share != null ? `${p.rush_share}%` : "–"));
+        usageTiles.push(statTile("Target Share", p.target_share != null ? `${p.target_share}%` : "–"));
+      } else if (p.position === "WR" || p.position === "TE") {
+        usageTiles.push(statTile("Target Share", p.target_share != null ? `${p.target_share}%` : "–"));
+        usageTiles.push(statTile("Air-Yards-Share", p.air_yards_share != null ? `${p.air_yards_share}%` : "–"));
+      }
+      usageTiles.push(
+        statTile("Snap %", p.snap_pct ? `${p.snap_pct}%` : "–"),
+        statTile("Touches/Sp.", fmt1(p.touches_pg)),
+        statTile("Red-Zone/Sp.", fmt1(p.redzone_pg)),
+        statTile("Spiele", p.games_played ?? "–")
       );
+      panel.appendChild(el("div", { class: "section-label" }, "Usage (Ø pro Spiel)"));
+      panel.appendChild(el("div", { class: "grid grid-3" }, usageTiles));
+
+      const mates = buildTeammateComparison(p);
+      if (mates) {
+        panel.appendChild(el("div", { class: "section-label" }, `Vergleich ${p.position === "RB" ? "Backfield" : "Receiver"} (${p.team})`));
+        panel.appendChild(mates);
+      }
     }
 
     panel.appendChild(el("div", { class: "section-label" }, "Fantasy-Punkte pro Woche"));
     panel.appendChild(chart);
+
+    panel.appendChild(el("div", { class: "section-label" }, "Trade-Wert-Verlauf"));
+    panel.appendChild(buildTradeValueSparkline(p));
 
     panel.appendChild(el("div", { class: "section-label" }, "Restprogramm"));
     panel.appendChild(restRow);
@@ -1763,6 +1810,56 @@
 
     panel.classList.add("open");
     backdrop.classList.add("open");
+  }
+
+  function buildTeammateComparison(p) {
+    if (!p.team) return null;
+    const groupPositions = p.position === "RB" ? ["RB"] : ["WR", "TE"];
+    const metric = p.position === "RB" ? "rush_share" : "target_share";
+    const mates = Object.values(DATA.players).filter(
+      (x) => x.team === p.team && groupPositions.includes(x.position) && x[metric] != null
+    );
+    if (mates.length < 2) return null;
+    mates.sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
+    const max = Math.max(...mates.map((m) => m[metric] || 0), 1);
+    return el(
+      "div",
+      {},
+      mates.slice(0, 6).map((m) =>
+        el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px;" }, [
+          el("div", { style: `width:92px;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:${m.id === p.id ? "800" : "400"};` }, m.name),
+          el("div", { style: "flex:1;background:var(--accent-soft);border-radius:4px;height:8px;overflow:hidden;" }, [
+            el("div", { style: `width:${Math.max(3, (m[metric] / max) * 100)}%;height:100%;background:${m.id === p.id ? "var(--accent)" : "var(--text-faint)"};` }),
+          ]),
+          el("div", { style: "width:42px;text-align:right;font-size:11px;color:var(--text-muted);" }, `${m[metric]}%`),
+        ])
+      )
+    );
+  }
+
+  function buildTradeValueSparkline(p) {
+    const points = p.trade_value_history || [];
+    if (points.length < 2) {
+      return el("div", { class: "empty-state" },
+        points.length === 1
+          ? `Erster erfasster Wert: ${fmtInt(points[0].value)} (Verlauf baut sich mit künftigen täglichen Läufen auf)`
+          : "Noch keine Verlaufsdaten erfasst."
+      );
+    }
+    const vals = points.map((pt) => pt.value);
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const range = Math.max(1, max - min);
+    const w = 280, h = 44;
+    const stepX = w / (vals.length - 1);
+    const coords = vals.map((v, i) => `${(i * stepX).toFixed(1)},${(h - ((v - min) / range) * h).toFixed(1)}`).join(" ");
+    const trendUp = vals[vals.length - 1] >= vals[0];
+    const color = trendUp ? "var(--status-good)" : "var(--status-bad)";
+    const svgWrap = el("div", {});
+    svgWrap.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;max-width:100%;"><polyline points="${coords}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+    return el("div", {}, [
+      svgWrap,
+      el("div", { style: "font-size:11px;color:var(--text-muted);margin-top:4px;" }, `${fmtInt(vals[0])} → ${fmtInt(vals[vals.length - 1])} (${points.length} Läufe)`),
+    ]);
   }
 
   function statTile(label, value) {

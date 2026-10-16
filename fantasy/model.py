@@ -128,9 +128,41 @@ def _matchup_factor(allowed, league_avg, opponent, position):
     return round(max(0.85, min(1.15, value / base)), 3)
 
 
+def _defense_ranks(defense_allowed):
+    """pos -> {team: rank}; Rang 1 = lässt am wenigsten Punkte zu
+    (schwerstes Matchup für diese Position)."""
+    ranks = {}
+    for pos in MATCHUP_POSITIONS:
+        entries = [(team, by_pos.get(pos)) for team, by_pos in defense_allowed.items() if by_pos.get(pos) is not None]
+        entries.sort(key=lambda kv: kv[1])
+        ranks[pos] = {team: i + 1 for i, (team, _) in enumerate(entries)}
+    return ranks
+
+
+def _team_week_share_totals(weekly_stats_by_week, players_db, current_week):
+    """(team, week) -> {"targets", "air_yards", "rush_att"} Team-Summen,
+    Grundlage für Target-/Air-Yards-/Rushing-Share. Nutzt die vollständigen
+    Wochenstatistiken aller Spieler (nicht nur den relevanten Pool), damit
+    die Team-Summe nicht durch unsere Spieler-Vorauswahl verzerrt wird."""
+    totals = {}
+    for wk, stats_by_pid in weekly_stats_by_week.items():
+        if wk > current_week:
+            continue
+        for pid, raw in stats_by_pid.items():
+            pinfo = players_db.get(pid)
+            team = pinfo.get("team") if pinfo else None
+            if not team:
+                continue
+            t = totals.setdefault((team, wk), {"targets": 0.0, "air_yards": 0.0, "rush_att": 0.0})
+            t["targets"] += raw.get("rec_tgt") or 0
+            t["air_yards"] += raw.get("rec_air_yd") or 0
+            t["rush_att"] += raw.get("rush_att") or 0
+    return totals
+
+
 def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_proj,
                     current_week, bye_weeks, trade_values, trending_add, trending_drop,
-                    rest_of_season):
+                    rest_of_season, team_week_totals, vegas_odds, trade_value_history):
     fantasy_positions = pinfo.get("fantasy_positions") or []
     primary_position = pinfo.get("position")
     # Spieler mit Doppel-Listung (z.B. WR/DB) sollen mit ihrer fantasy-relevanten
@@ -144,8 +176,9 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
 
     weekly_points = {}
     played_weeks = []
-    targets_total = touches_total = redzone_total = air_yards_total = 0.0
+    targets_total = touches_total = redzone_total = air_yards_total = rush_att_total = 0.0
     snap_pct_samples = []
+    target_share_weekly = {}
     for wk in sorted(weekly_stats_by_week.keys()):
         if wk > current_week:
             continue
@@ -154,14 +187,19 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
         weekly_points[str(wk)] = pts
         if raw:
             played_weeks.append(wk)
-            targets_total += raw.get("rec_tgt") or 0
+            wk_targets = raw.get("rec_tgt") or 0
+            targets_total += wk_targets
             touches_total += (raw.get("rush_att") or 0) + (raw.get("rec") or 0)
             redzone_total += (raw.get("rec_rz_tgt") or 0) + (raw.get("rush_rz_att") or 0)
             air_yards_total += raw.get("rec_air_yd") or 0
+            rush_att_total += raw.get("rush_att") or 0
             tm_snp = raw.get("tm_off_snp")
             off_snp = raw.get("off_snp")
             if tm_snp:
                 snap_pct_samples.append((off_snp or 0) / tm_snp)
+            team_totals = team_week_totals.get((team, wk)) if team else None
+            if team_totals and team_totals["targets"] and wk_targets:
+                target_share_weekly[str(wk)] = round(wk_targets / team_totals["targets"] * 100, 1)
 
     season_total = round(sum(weekly_points.values()), 2)
     played_count = len(played_weeks)
@@ -177,6 +215,20 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
     projection_week = score_stats(proj_raw, scoring_settings) if proj_raw else 0.0
 
     tv = trade_values.get(pid) or {}
+
+    team_season_targets = team_season_air_yards = team_season_rush_att = 0.0
+    if team:
+        for wk in range(1, current_week + 1):
+            t = team_week_totals.get((team, wk))
+            if t:
+                team_season_targets += t["targets"]
+                team_season_air_yards += t["air_yards"]
+                team_season_rush_att += t["rush_att"]
+    target_share = round(targets_total / team_season_targets * 100, 1) if team_season_targets else None
+    air_yards_share = round(air_yards_total / team_season_air_yards * 100, 1) if team_season_air_yards else None
+    rush_share = round(rush_att_total / team_season_rush_att * 100, 1) if team_season_rush_att else None
+
+    vegas = vegas_odds.get(team) if team else None
 
     if is_def:
         name = pinfo.get("first_name", "") + " " + pinfo.get("last_name", "")
@@ -197,6 +249,8 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
         "injury_status": pinfo.get("injury_status"),
         "injury_body_part": pinfo.get("injury_body_part"),
         "injury_notes": pinfo.get("injury_notes"),
+        "practice_participation": pinfo.get("practice_participation"),
+        "practice_description": pinfo.get("practice_description"),
         "bye_week": bye_weeks.get(team) if team else None,
         "depth_chart_order": pinfo.get("depth_chart_order"),
         "photo": photo,
@@ -214,14 +268,20 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
         "redzone_pg": round(redzone_total / played_count, 1) if played_count else 0.0,
         "air_yards": round(air_yards_total) if air_yards_total else 0,
         "air_yards_pg": round(air_yards_total / played_count, 1) if played_count else 0.0,
+        "target_share": target_share,
+        "target_share_weekly": target_share_weekly,
+        "air_yards_share": air_yards_share,
+        "rush_share": rush_share if position == "RB" else None,
         "projection_week": round(projection_week, 2),
         "trade_value": tv.get("value"),
         "trade_rank": tv.get("overallRank"),
         "trade_pos_rank": tv.get("positionRank"),
         "trade_trend_30d": tv.get("trend30Day"),
+        "trade_value_history": trade_value_history.get(pid, []),
         "trending_add": trending_add.get(pid),
         "trending_drop": trending_drop.get(pid),
         "rest_of_season": rest_of_season.get(team, []) if team else [],
+        "vegas": vegas,
         "fantasy_team": None,  # wird nach dem Aufbau der Teams gefüllt
     }
 
@@ -229,13 +289,17 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
 def build(*, state, league, rosters, users, matchups, players_db, schedule,
           weekly_stats_by_week, weekly_proj, trade_values, trending_add_list,
           trending_drop_list, relevant_player_ids, my_username,
-          future_matchups_by_week=None, transactions=None):
+          future_matchups_by_week=None, transactions=None,
+          vegas_odds=None, trade_value_history=None):
     season = state["season"]
     current_week = state.get("display_week") or state.get("week") or 1
     scoring_settings = league.get("scoring_settings", {})
+    vegas_odds = vegas_odds or {}
+    trade_value_history = trade_value_history or {}
 
     bye_weeks = _compute_byes(schedule)
     rest_of_season = _remaining_schedule(schedule, current_week)
+    team_week_totals = _team_week_share_totals(weekly_stats_by_week, players_db, current_week)
 
     trending_add = {e["player_id"]: e["count"] for e in trending_add_list}
     trending_drop = {e["player_id"]: e["count"] for e in trending_drop_list}
@@ -251,16 +315,20 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         players[pid] = _player_record(
             pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_proj,
             current_week, bye_weeks, trade_values, trending_add, trending_drop,
-            rest_of_season,
+            rest_of_season, team_week_totals, vegas_odds, trade_value_history,
         )
 
     # --- Matchup-Stärke (für diese Woche) je Spieler ---
     team_week_opponent = _team_opponent_by_week(schedule)
     defense_allowed, defense_league_avg = _defense_vs_position(players, team_week_opponent)
+    defense_ranks = _defense_ranks(defense_allowed)
     for p in players.values():
         opp = (team_week_opponent.get(p["team"]) or {}).get(current_week) if p["team"] else None
         p["matchup_opponent"] = opp
         p["matchup_factor"] = _matchup_factor(defense_allowed, defense_league_avg, opp, p["position"])
+        pos_ranks = defense_ranks.get(p["position"], {})
+        p["matchup_rank"] = pos_ranks.get(opp)
+        p["matchup_rank_of"] = len(pos_ranks) if p["matchup_rank"] else None
 
     # --- Teams / Standings ---
     teams = []

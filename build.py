@@ -10,12 +10,13 @@ Fallback/leeren Werten weitergearbeitet statt Daten zu erfinden.
 import json
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from fantasy import config, model
+from fantasy import config, model, history, espn_odds
 from fantasy import sleeper_api as sleeper
 from fantasy import fantasycalc_api
 
@@ -33,6 +34,7 @@ def fetch_all_relevant_player_ids(rosters, players_db, trending_add_list, trendi
     trending_ids = {
         pid for pid in trending_ids_raw
         if (players_db.get(pid) or {}).get("position") in config.RELEVANT_POSITIONS
+        and (players_db.get(pid) or {}).get("active")
     }
 
     # Alle 32 Team-Defenses immer aufnehmen (kleine, feste Menge).
@@ -132,6 +134,17 @@ def main():
         except Exception as exc:  # noqa: BLE001
             log(f"WARNUNG: Transaktionen für Woche {wk} nicht verfügbar ({exc}).")
 
+    log("Lade Vegas-Odds (ESPN, öffentlich) für die aktuelle Woche ...")
+    vegas_odds = espn_odds.get_week_odds(season, current_week)
+    if not vegas_odds:
+        log("WARNUNG: Keine Vegas-Odds erhalten, Spread/Over-Under bleiben leer.")
+
+    run_date = datetime.now(timezone.utc).isoformat()
+    history_path = ROOT / "history.json"
+    hist = history.append_and_save(history_path, run_date, trade_values)
+    trade_value_history = history.player_histories(hist, relevant_ids)
+    log(f"history.json aktualisiert ({len(hist['runs'])} Läufe gespeichert).")
+
     log("Baue data.json-Modell ...")
     data = model.build(
         state=state,
@@ -150,6 +163,8 @@ def main():
         my_username=config.SLEEPER_USERNAME,
         future_matchups_by_week=future_matchups_by_week,
         transactions=transactions,
+        vegas_odds=vegas_odds,
+        trade_value_history=trade_value_history,
     )
 
     docs = ROOT / "docs"
