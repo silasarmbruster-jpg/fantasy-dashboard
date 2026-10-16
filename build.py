@@ -116,6 +116,22 @@ def main():
     if not trade_values:
         log("WARNUNG: Keine FantasyCalc-Werte erhalten, Trade-Werte bleiben leer.")
 
+    log("Lade zukünftige Matchups (für Restprogramm) ...")
+    future_matchups_by_week = {}
+    for wk in range(current_week + 1, 19):
+        try:
+            future_matchups_by_week[wk] = sleeper.get_matchups(config.LEAGUE_ID, wk)
+        except Exception as exc:  # noqa: BLE001
+            log(f"WARNUNG: Matchups für Woche {wk} nicht verfügbar ({exc}).")
+
+    log(f"Lade Transaktionen 1..{current_week} ...")
+    transactions = []
+    for wk in range(1, current_week + 1):
+        try:
+            transactions.extend(sleeper.get_transactions(config.LEAGUE_ID, wk) or [])
+        except Exception as exc:  # noqa: BLE001
+            log(f"WARNUNG: Transaktionen für Woche {wk} nicht verfügbar ({exc}).")
+
     log("Baue data.json-Modell ...")
     data = model.build(
         state=state,
@@ -132,6 +148,8 @@ def main():
         trending_drop_list=trending_drop_list,
         relevant_player_ids=relevant_ids,
         my_username=config.SLEEPER_USERNAME,
+        future_matchups_by_week=future_matchups_by_week,
+        transactions=transactions,
     )
 
     docs = ROOT / "docs"

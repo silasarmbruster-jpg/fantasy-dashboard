@@ -4,7 +4,7 @@ data.json-Modell, das das Frontend konsumiert."""
 import math
 from datetime import datetime, timezone
 
-from . import config, waiver, startsit, tradefinder
+from . import config, waiver, startsit, tradefinder, planner, league_feed
 from .scoring import score as score_stats
 
 MATCHUP_POSITIONS = ("QB", "RB", "WR", "TE", "K")
@@ -226,7 +226,8 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
 
 def build(*, state, league, rosters, users, matchups, players_db, schedule,
           weekly_stats_by_week, weekly_proj, trade_values, trending_add_list,
-          trending_drop_list, relevant_player_ids, my_username):
+          trending_drop_list, relevant_player_ids, my_username,
+          future_matchups_by_week=None, transactions=None):
     season = state["season"]
     current_week = state.get("display_week") or state.get("week") or 1
     scoring_settings = league.get("scoring_settings", {})
@@ -410,4 +411,9 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
     data["waiver"] = waiver.compute(data)
     data["start_sit"] = startsit.compute(data)
     data["trade_finder"] = tradefinder.compute(data)
+    data["planner"] = planner.compute(data, future_matchups_by_week or {})
+    data["league_feed"] = {
+        "power_ranking": league_feed.power_ranking(teams),
+        "transactions": league_feed.normalize_transactions(transactions or [], roster_by_id),
+    }
     return data

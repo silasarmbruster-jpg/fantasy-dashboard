@@ -37,24 +37,33 @@ Ordner: /docs** gestellt werden (Settings → Pages). Danach aktualisiert
 ## Entwicklungsstand (Phasen)
 
 1. ✅ Datenabruf, Design-Grundgerüst, Übersicht, Mein Roster
-2. ⏳ Alle Spieler, Spieler-Detailseite, Waiver Wire
-3. ⏳ Start/Sit
-4. ⏳ Trade Finder, Trade-Analyzer
-5. ⏳ Liga, Planer, Automatisierung (final)
+2. ✅ Alle Spieler, Spieler-Detailseite, Waiver Wire
+3. ✅ Start/Sit
+4. ✅ Trade Finder, Trade-Analyzer
+5. ✅ Liga, Planer, Automatisierung (final)
+
+Alle neun Tabs sind fertig: Übersicht, Mein Roster, Start/Sit, Waiver Wire,
+Alle Spieler, Trade Finder, Trade-Analyzer, Liga, Planer.
 
 ## Projektstruktur
 
 ```
-build.py              Orchestriert Datenabruf + generiert docs/
+build.py                Orchestriert Datenabruf + generiert docs/
 fantasy/
-  config.py            Liga-ID, relevante Positionen, Limits
-  sleeper_api.py        Sleeper-API-Client
-  fantasycalc_api.py     FantasyCalc-API-Client
-  scoring.py            Generischer Fantasy-Punkte-Rechner nach Liga-Scoring
-  model.py               Baut data.json aus den Rohdaten
-site/                  Statische Templates (werden 1:1 nach docs/ kopiert)
+  config.py              Liga-ID, relevante Positionen, Limits
+  sleeper_api.py          Sleeper-API-Client
+  fantasycalc_api.py       FantasyCalc-API-Client
+  scoring.py              Generischer Fantasy-Punkte-Rechner nach Liga-Scoring
+  roster_strength.py       Team-Stärke je Position relativ zur Liga (geteilt)
+  model.py                 Baut das Kern-Datenmodell (Teams, Spieler, Matchup)
+  waiver.py                Waiver-Wire-Empfehlungen
+  startsit.py              Start/Sit-Lineup-Optimizer + Matchup-Faktor
+  tradefinder.py            Trade-Finder (Bedarf/Überschuss, faire Vorschläge)
+  planner.py               Bye-Week-Kalender + Restprogramm
+  league_feed.py            Power-Ranking + Transaktions-Feed
+site/                    Statische Templates (werden 1:1 nach docs/ kopiert)
   index.html
-  app.js
+  app.js                  Komplette Vanilla-JS-SPA (Routing, alle Tabs)
   styles.css
-docs/                  Build-Ausgabe, von GitHub Pages ausgeliefert
+docs/                    Build-Ausgabe, von GitHub Pages ausgeliefert
 ```
