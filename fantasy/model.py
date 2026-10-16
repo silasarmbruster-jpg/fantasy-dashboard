@@ -4,7 +4,7 @@ data.json-Modell, das das Frontend konsumiert."""
 import math
 from datetime import datetime, timezone
 
-from . import config
+from . import config, waiver
 from .scoring import score as score_stats
 
 TEAM_LOGO = "https://sleepercdn.com/images/team_logos/nfl/{team}.png"
@@ -87,6 +87,8 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
 
     weekly_points = {}
     played_weeks = []
+    targets_total = touches_total = redzone_total = air_yards_total = 0.0
+    snap_pct_samples = []
     for wk in sorted(weekly_stats_by_week.keys()):
         if wk > current_week:
             continue
@@ -95,10 +97,19 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
         weekly_points[str(wk)] = pts
         if raw:
             played_weeks.append(wk)
+            targets_total += raw.get("rec_tgt") or 0
+            touches_total += (raw.get("rush_att") or 0) + (raw.get("rec") or 0)
+            redzone_total += (raw.get("rec_rz_tgt") or 0) + (raw.get("rush_rz_att") or 0)
+            air_yards_total += raw.get("rec_air_yd") or 0
+            tm_snp = raw.get("tm_off_snp")
+            off_snp = raw.get("off_snp")
+            if tm_snp:
+                snap_pct_samples.append((off_snp or 0) / tm_snp)
 
     season_total = round(sum(weekly_points.values()), 2)
     played_count = len(played_weeks)
     season_avg = round(season_total / played_count, 2) if played_count else 0.0
+    snap_pct = round(sum(snap_pct_samples) / len(snap_pct_samples) * 100, 1) if snap_pct_samples else None
 
     last3 = sorted(played_weeks)[-3:]
     avg_last3 = (
@@ -136,6 +147,15 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
         "season_avg": season_avg,
         "avg_last3": avg_last3,
         "games_played": played_count,
+        "targets": round(targets_total) if targets_total else 0,
+        "targets_pg": round(targets_total / played_count, 1) if played_count else 0.0,
+        "touches": round(touches_total) if touches_total else 0,
+        "touches_pg": round(touches_total / played_count, 1) if played_count else 0.0,
+        "snap_pct": snap_pct,
+        "redzone_touches": round(redzone_total) if redzone_total else 0,
+        "redzone_pg": round(redzone_total / played_count, 1) if played_count else 0.0,
+        "air_yards": round(air_yards_total) if air_yards_total else 0,
+        "air_yards_pg": round(air_yards_total / played_count, 1) if played_count else 0.0,
         "projection_week": round(projection_week, 2),
         "trade_value": tv.get("value"),
         "trade_rank": tv.get("overallRank"),
@@ -323,4 +343,5 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         },
         "players": players,
     }
+    data["waiver"] = waiver.compute(data)
     return data
