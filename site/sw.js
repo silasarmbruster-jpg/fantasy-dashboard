@@ -1,8 +1,14 @@
 // Minimaler Service Worker, nur um die Seite installierbar zu machen
-// (PWA-Kriterium). Cached die statische App-Shell für schnelles Laden;
-// data.json wird bewusst IMMER frisch aus dem Netz geladen (network-only),
-// damit nie veraltete Liga-Daten angezeigt werden.
-const CACHE_NAME = "fantasy-hq-shell-v1";
+// (PWA-Kriterium). Netzwerk-zuerst für die App-Shell (index.html/app.js/
+// styles.css): die App ändert sich oft (tägliche Builds, laufende
+// Entwicklung), ein reiner Cache-zuerst-Ansatz hätte bei jeder Änderung
+// alte Versionen stehen lassen, bis jemand die Cache-Version manuell
+// hochzählt - das ist bei der letzten Design-Überarbeitung genau so
+// passiert. Netzwerk-zuerst behebt das dauerhaft: der Cache dient nur noch
+// als Offline-Fallback, wird bei jedem erfolgreichen Laden aktualisiert.
+// data.json bleibt komplett außen vor (immer frisch, nie gecacht), damit
+// nie veraltete Liga-Daten angezeigt werden.
+const CACHE_NAME = "fantasy-hq-shell-v2";
 const SHELL_FILES = ["./index.html", "./app.js", "./styles.css", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -23,7 +29,16 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.endsWith("data.json")) {
     return; // immer Netz, kein Caching der Liga-Daten
   }
+  if (url.origin !== location.origin) {
+    return; // externe CDN-Ressourcen (Google Fonts, Lucide) nicht über den SW führen
+  }
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    fetch(event.request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
