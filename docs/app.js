@@ -8,8 +8,8 @@
     { id: "startsit", label: "Start/Sit", icon: "🔁", ready: true },
     { id: "waiver", label: "Waiver Wire", icon: "📈", ready: true },
     { id: "players", label: "Alle Spieler", icon: "📋", ready: true },
-    { id: "tradefinder", label: "Trade Finder", icon: "🔄", ready: false, phase: "Phase 4" },
-    { id: "tradeanalyzer", label: "Trade-Analyzer", icon: "⚖️", ready: false, phase: "Phase 4" },
+    { id: "tradefinder", label: "Trade Finder", icon: "🔄", ready: true },
+    { id: "tradeanalyzer", label: "Trade-Analyzer", icon: "⚖️", ready: true },
     { id: "league", label: "Liga", icon: "🏆", ready: false, phase: "Phase 5" },
     { id: "planner", label: "Planer", icon: "🗓️", ready: false, phase: "Phase 5" },
   ];
@@ -90,6 +90,8 @@
     else if (tabId === "players") root.appendChild(renderPlayers());
     else if (tabId === "waiver") root.appendChild(renderWaiver());
     else if (tabId === "startsit") root.appendChild(renderStartSit());
+    else if (tabId === "tradefinder") root.appendChild(renderTradeFinder());
+    else if (tabId === "tradeanalyzer") root.appendChild(renderTradeAnalyzer());
   }
 
   function renderNav(activeId) {
@@ -179,7 +181,7 @@
     frag.appendChild(grid);
 
     const grid2 = el("div", { class: "grid grid-2" });
-    grid2.appendChild(renderComingSoonMiniCard("Top Trade-Vorschläge", "🔄", "tradefinder", "Phase 4"));
+    grid2.appendChild(renderTradeTipsCard());
     frag.appendChild(grid2);
     return frag;
   }
@@ -341,6 +343,28 @@
       : el("div", { class: "empty-state" }, "Dein Lineup ist bereits optimal gesetzt.");
     return el("div", { class: "card" }, [
       el("div", { class: "card-title" }, ["Start/Sit-Hinweise", el("button", { class: "see-all", onclick: () => navigateTo("startsit") }, "Alle ansehen")]),
+      body,
+    ]);
+  }
+
+  function renderTradeTipsCard() {
+    const withProposal = DATA.trade_finder.teams.filter((t) => t.proposal).slice(0, 3);
+    const body = withProposal.length
+      ? el(
+          "div",
+          { class: "mini-list" },
+          withProposal.map((t) => {
+            const g = DATA.players[t.proposal.give_player_id];
+            const r = DATA.players[t.proposal.get_player_id];
+            return el("div", { class: "mini-item", style: "display:block;" }, [
+              el("div", {}, [playerLink(g.id), " ⇄ ", playerLink(r.id)]),
+              el("div", { class: "reason" }, `mit ${t.team_name}`),
+            ]);
+          })
+        )
+      : el("div", { class: "empty-state" }, "Aktuell kein ausgeglichener Vorschlag gefunden.");
+    return el("div", { class: "card" }, [
+      el("div", { class: "card-title" }, ["Top Trade-Vorschläge", el("button", { class: "see-all", onclick: () => navigateTo("tradefinder") }, "Alle ansehen")]),
       body,
     ]);
   }
@@ -611,6 +635,345 @@
     return wrap;
   }
 
+  // ---------- Lineup-Optimizer (Port von fantasy/startsit.py, für Trade-Analyzer) ----------
+  const HARD_OUT_STATUSES = new Set(["Out", "IR", "NA", "Sus", "PUP", "COV", "DNR"]);
+  const SOFT_INJURY_MULTIPLIER = { Doubtful: 0.5, Questionable: 0.9 };
+
+  function effectiveProjection(p, currentWeek) {
+    if (!p) return 0;
+    if (p.bye_week === currentWeek) return 0;
+    if (HARD_OUT_STATUSES.has(p.injury_status)) return 0;
+    const mult = SOFT_INJURY_MULTIPLIER[p.injury_status] || 1;
+    const factor = p.matchup_factor || 1;
+    return (p.projection_week || 0) * mult * factor;
+  }
+
+  function bestLineupPoints(playerIds, rosterPositions, currentWeek) {
+    const byPos = { QB: [], RB: [], WR: [], TE: [], K: [], DEF: [] };
+    playerIds.forEach((pid) => {
+      const p = DATA.players[pid];
+      if (!p || !byPos[p.position]) return;
+      if (p.bye_week === currentWeek || HARD_OUT_STATUSES.has(p.injury_status)) return;
+      byPos[p.position].push({ id: pid, eff: effectiveProjection(p, currentWeek) });
+    });
+    Object.values(byPos).forEach((l) => l.sort((a, b) => b.eff - a.eff));
+
+    const used = new Set();
+    function take(pos, n) {
+      const out = [];
+      for (const item of byPos[pos]) {
+        if (out.length >= n) break;
+        if (used.has(item.id)) continue;
+        out.push(item);
+        used.add(item.id);
+      }
+      return out;
+    }
+    const counts = {};
+    rosterPositions.forEach((l) => (counts[l] = (counts[l] || 0) + 1));
+
+    let total = 0;
+    ["QB", "RB", "WR", "TE", "K", "DEF"].forEach((pos) => {
+      total += take(pos, counts[pos] || 0).reduce((s, i) => s + i.eff, 0);
+    });
+
+    const flexNeeded = counts["FLEX"] || 0;
+    const flexCandidates = [];
+    ["RB", "WR", "TE"].forEach((pos) => byPos[pos].forEach((item) => { if (!used.has(item.id)) flexCandidates.push(item); }));
+    flexCandidates.sort((a, b) => b.eff - a.eff);
+    total += flexCandidates.slice(0, flexNeeded).reduce((s, i) => s + i.eff, 0);
+
+    return Math.round(total * 10) / 10;
+  }
+
+  // ---------- Trade-Analyzer ----------
+  const tradeAnalyzer = { give: [], get: [], giveSearch: "", getSearch: "" };
+
+  function renderTradeAnalyzer() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+    frag.appendChild(el("div", { class: "card-title", style: "margin-bottom:0;" }, "Trade-Analyzer"));
+    frag.appendChild(
+      el("div", { class: "empty-state", style: "margin:4px 0 14px;" }, "Wähle Spieler aus deinem Kader und von anderen Teams, um einen Trade zu bewerten.")
+    );
+
+    const columns = el("div", { class: "grid grid-2" });
+    const verdictHost = el("div", {});
+
+    function refreshVerdict() {
+      verdictHost.innerHTML = "";
+      verdictHost.appendChild(buildAnalyzerVerdict());
+    }
+
+    function myCandidates() {
+      const mine = [
+        ...DATA.my_roster.slots.map((s) => s.player_id),
+        ...DATA.my_roster.bench,
+        ...DATA.my_roster.reserve,
+      ];
+      return mine.map((id) => DATA.players[id]).filter((p) => p && !tradeAnalyzer.give.includes(p.id));
+    }
+    function otherCandidates() {
+      return Object.values(DATA.players).filter(
+        (p) => p.fantasy_team && p.fantasy_team.roster_id !== DATA.me.roster_id && !tradeAnalyzer.get.includes(p.id)
+      );
+    }
+
+    columns.appendChild(buildAnalyzerSide("give", "Du gibst ab", myCandidates, refreshVerdict));
+    columns.appendChild(buildAnalyzerSide("get", "Du bekommst", otherCandidates, refreshVerdict));
+    frag.appendChild(columns);
+    frag.appendChild(verdictHost);
+    refreshVerdict();
+
+    return frag;
+  }
+
+  function buildAnalyzerSide(side, title, candidatesFn, onChange) {
+    const card = el("div", { class: "card" });
+    card.appendChild(el("div", { class: "card-title" }, title));
+
+    const input = el("input", {
+      type: "text",
+      placeholder: "Spieler hinzufügen…",
+      style:
+        "width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);margin-bottom:8px;",
+    });
+    input.value = tradeAnalyzer[side + "Search"] || "";
+
+    const suggestionsHost = el("div", {});
+    const selectedHost = el("div", { class: "mini-list" });
+    const totalHost = el("div", { style: "text-align:right;font-weight:800;margin-top:8px;font-size:13px;" });
+
+    function refreshSuggestions() {
+      suggestionsHost.innerHTML = "";
+      const search = (tradeAnalyzer[side + "Search"] || "").trim();
+      if (!search) return;
+      const q = search.toLowerCase();
+      const filtered = candidatesFn().filter((p) => p.name.toLowerCase().includes(q)).slice(0, 8);
+      if (!filtered.length) {
+        suggestionsHost.appendChild(el("div", { class: "empty-state" }, "Keine Treffer."));
+        return;
+      }
+      suggestionsHost.appendChild(
+        el(
+          "div",
+          { style: "border:1px solid var(--card-border);border-radius:8px;margin-bottom:10px;overflow:hidden;" },
+          filtered.map((p) =>
+            el(
+              "div",
+              {
+                style: "padding:8px 10px;cursor:pointer;border-top:1px solid var(--card-border);",
+                onclick: () => {
+                  tradeAnalyzer[side].push(p.id);
+                  tradeAnalyzer[side + "Search"] = "";
+                  input.value = "";
+                  refreshSuggestions();
+                  refreshSelected();
+                  onChange();
+                },
+              },
+              [posChip(p.position), ` ${p.name} `, el("span", { style: "color:var(--text-muted);font-size:11px;" }, p.fantasy_team ? `(${p.fantasy_team.team_name})` : "Frei")]
+            )
+          )
+        )
+      );
+    }
+
+    function refreshSelected() {
+      selectedHost.innerHTML = "";
+      const ids = tradeAnalyzer[side];
+      if (!ids.length) {
+        selectedHost.appendChild(el("div", { class: "empty-state" }, "Noch keine Spieler ausgewählt."));
+      } else {
+        ids.forEach((id) => {
+          const p = DATA.players[id];
+          if (!p) return;
+          selectedHost.appendChild(
+            el("div", { class: "mini-item" }, [
+              el("div", {}, [posChip(p.position), " ", playerLink(p.id)]),
+              el("div", { style: "display:flex;align-items:center;gap:8px;" }, [
+                el("span", {}, p.trade_value ? fmtInt(p.trade_value) : "–"),
+                el(
+                  "button",
+                  {
+                    class: "btn",
+                    style: "padding:2px 8px;",
+                    onclick: () => {
+                      tradeAnalyzer[side] = tradeAnalyzer[side].filter((x) => x !== id);
+                      refreshSuggestions();
+                      refreshSelected();
+                      onChange();
+                    },
+                  },
+                  "✕"
+                ),
+              ]),
+            ])
+          );
+        });
+      }
+      const total = ids.reduce((s, id) => s + (DATA.players[id]?.trade_value || 0), 0);
+      totalHost.textContent = `Summe: ${fmtInt(total)}`;
+    }
+
+    input.addEventListener("input", (e) => {
+      tradeAnalyzer[side + "Search"] = e.target.value;
+      refreshSuggestions();
+    });
+
+    card.appendChild(input);
+    card.appendChild(suggestionsHost);
+    card.appendChild(selectedHost);
+    card.appendChild(totalHost);
+    refreshSuggestions();
+    refreshSelected();
+    return card;
+  }
+
+  function buildAnalyzerVerdict() {
+    const giveIds = tradeAnalyzer.give;
+    const getIds = tradeAnalyzer.get;
+    if (!giveIds.length && !getIds.length) {
+      return el("div", { class: "card empty-state" }, "Wähle Spieler auf beiden Seiten, um den Trade zu bewerten.");
+    }
+
+    const giveValue = giveIds.reduce((s, id) => s + (DATA.players[id]?.trade_value || 0), 0);
+    const getValue = getIds.reduce((s, id) => s + (DATA.players[id]?.trade_value || 0), 0);
+    const diffPct = giveValue || getValue ? (getValue - giveValue) / Math.max(giveValue, getValue, 1) : 0;
+
+    let verdict = "Fair";
+    let verdictColor = "var(--text-muted)";
+    if (diffPct > 0.1) {
+      verdict = "Gewinn für dich";
+      verdictColor = "var(--status-good)";
+    } else if (diffPct < -0.1) {
+      verdict = "Verlust für dich";
+      verdictColor = "var(--status-bad)";
+    }
+
+    const currentWeek = DATA.league.week;
+    const rosterPositions = DATA.league.roster_positions;
+    const myCurrentIds = [...DATA.my_roster.slots.map((s) => s.player_id), ...DATA.my_roster.bench];
+    const hypotheticalIds = myCurrentIds.filter((id) => !giveIds.includes(id)).concat(getIds.filter((id) => !myCurrentIds.includes(id)));
+
+    const beforePts = bestLineupPoints(myCurrentIds, rosterPositions, currentWeek);
+    const afterPts = bestLineupPoints(hypotheticalIds, rosterPositions, currentWeek);
+    const ptsDelta = Math.round((afterPts - beforePts) * 10) / 10;
+
+    function countByPos(ids) {
+      const c = {};
+      ids.forEach((id) => {
+        const p = DATA.players[id];
+        if (p) c[p.position] = (c[p.position] || 0) + 1;
+      });
+      return c;
+    }
+    const before = countByPos(myCurrentIds);
+    const after = countByPos(hypotheticalIds);
+    const posRows = POSITIONS.map((pos) =>
+      el("div", { style: "text-align:center;" }, [
+        posChip(pos),
+        el("div", { style: "font-size:13px;margin-top:4px;" }, `${before[pos] || 0} → ${after[pos] || 0}`),
+      ])
+    );
+
+    return el("div", { class: "card" }, [
+      el("div", { class: "card-title" }, "Urteil"),
+      el("div", { style: `font-size:20px;font-weight:800;color:${verdictColor};` }, verdict),
+      el(
+        "div",
+        { style: "color:var(--text-muted);font-size:13px;margin-top:4px;" },
+        `Wertdifferenz: ${fmtInt(giveValue)} abgegeben vs. ${fmtInt(getValue)} erhalten (${(diffPct * 100).toFixed(1)}%)`
+      ),
+      el("div", { class: "section-label" }, "Auswirkung auf dein Lineup"),
+      el("div", { style: "display:flex;gap:20px;align-items:center;flex-wrap:wrap;" }, [
+        el("div", {}, [el("div", { style: "font-size:22px;font-weight:800;" }, fmt1(beforePts)), el("div", { style: "font-size:11px;color:var(--text-muted);" }, "Vorher")]),
+        el("div", { style: "color:var(--text-faint);" }, "→"),
+        el("div", {}, [el("div", { style: "font-size:22px;font-weight:800;" }, fmt1(afterPts)), el("div", { style: "font-size:11px;color:var(--text-muted);" }, "Nachher")]),
+        el(
+          "div",
+          { style: `font-weight:800;color:${ptsDelta >= 0 ? "var(--status-good)" : "var(--status-bad)"};` },
+          `${ptsDelta >= 0 ? "+" : ""}${ptsDelta} Pkt./Woche`
+        ),
+      ]),
+      el("div", { class: "section-label" }, "Positions-Tiefe (vorher → nachher)"),
+      el("div", { style: "display:flex;gap:16px;flex-wrap:wrap;" }, posRows),
+    ]);
+  }
+
+  function addPlayerToAnalyzer(pid) {
+    const p = DATA.players[pid];
+    if (!p) return;
+    const isMine = p.fantasy_team && p.fantasy_team.roster_id === DATA.me.roster_id;
+    const side = isMine ? "give" : "get";
+    if (!tradeAnalyzer[side].includes(pid)) tradeAnalyzer[side].push(pid);
+    closePlayerDetail();
+    navigateTo("tradeanalyzer");
+    render();
+  }
+
+  // ---------- Trade Finder ----------
+  function renderTradeFinder() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+
+    const tf = DATA.trade_finder;
+    frag.appendChild(
+      el("div", { class: "card" }, [
+        el("div", { class: "card-title" }, "Meine Lage"),
+        el("div", {}, `Bedarf: ${tf.my_needs.length ? tf.my_needs.join(", ") : "kein akuter Bedarf"}`),
+        el("div", { style: "margin-top:6px;font-size:12px;color:var(--text-muted);" }, [
+          "Geschützte Schlüsselspieler (werden nie angeboten): ",
+          ...tf.key_player_ids.flatMap((id, i) => [i > 0 ? ", " : "", playerLink(id)]),
+        ]),
+      ])
+    );
+
+    tf.teams.forEach((t) => {
+      const card = el("div", { class: "card" }, [
+        el("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;" }, [
+          el("div", { style: "font-weight:700;" }, t.team_name),
+          el("div", { style: "font-size:11.5px;color:var(--text-muted);" }, [
+            t.needs.length ? `Bedarf: ${t.needs.join(", ")}` : "kein Bedarf",
+            " · ",
+            t.surplus.length ? `Überschuss: ${t.surplus.join(", ")}` : "kein Überschuss",
+          ]),
+        ]),
+      ]);
+      if (t.proposal) {
+        const g = DATA.players[t.proposal.give_player_id];
+        const r = DATA.players[t.proposal.get_player_id];
+        card.appendChild(
+          el("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-top:10px;flex-wrap:wrap;gap:10px;" }, [
+            el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;" }, [
+              el("span", {}, [posChip(g.position), " ", playerLink(g.id), ` (${fmtInt(t.proposal.give_value)})`]),
+              el("span", { style: "color:var(--text-faint);" }, "⇄"),
+              el("span", {}, [posChip(r.position), " ", playerLink(r.id), ` (${fmtInt(t.proposal.get_value)})`]),
+            ]),
+            el(
+              "button",
+              {
+                class: "btn",
+                onclick: () => {
+                  tradeAnalyzer.give = [g.id];
+                  tradeAnalyzer.get = [r.id];
+                  navigateTo("tradeanalyzer");
+                  render();
+                },
+              },
+              "Im Trade-Analyzer öffnen"
+            ),
+          ])
+        );
+      } else {
+        card.appendChild(el("div", { class: "empty-state", style: "margin-top:8px;" }, "Kein ausgeglichener 1-für-1-Vorschlag gefunden."));
+      }
+      frag.appendChild(card);
+    });
+
+    return frag;
+  }
+
   // ---------- Start/Sit ----------
   function renderStartSit() {
     const frag = el("div", {});
@@ -813,7 +1176,7 @@
 
     panel.appendChild(
       el("div", { style: "margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;" }, [
-        el("button", { class: "btn", onclick: () => toggleSavedList("tradeTargets", pid) }, "Zum Trade-Analyzer hinzufügen"),
+        el("button", { class: "btn", onclick: () => addPlayerToAnalyzer(pid) }, "Zum Trade-Analyzer hinzufügen"),
         el("button", { class: "btn", onclick: () => toggleSavedList("waiverTargets", pid) }, "Als Waiver-Ziel merken"),
       ])
     );

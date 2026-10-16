@@ -1,40 +1,14 @@
 """Berechnet Waiver-Wire-Empfehlungen: beste verfügbare Spieler je Position,
 gewichtet nach Roster-Schwächen, mit Begründung und Drop-Kandidat."""
 
-FLEX_ELIGIBLE = {"RB", "WR", "TE"}
-STARTER_SLOTS_BY_POS = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DEF": 1}
+from .roster_strength import FLEX_ELIGIBLE, STARTER_SLOTS_BY_POS, weakness_matrix
 
 MAX_SUGGESTIONS_PER_POSITION = 8
 
 
-def _effective_strength(player_ids, position, players):
-    """Durchschnitt der N stärksten Spieler eines Teams an einer Position,
-    wobei N die Anzahl der Start-Slots ist (Flex-Slots zählen anteilig für
-    RB/WR/TE mit hinein, vereinfacht über eine zusätzliche "Pseudo-Slot")."""
-    n_slots = STARTER_SLOTS_BY_POS.get(position, 1)
-    if position in FLEX_ELIGIBLE:
-        n_slots += 1  # zwei Flex-Slots auf drei Flex-fähige Positionen verteilt -> grobe Pauschale
-    pool = sorted(
-        (players[pid]["season_avg"] for pid in player_ids if pid in players and players[pid]["position"] == position),
-        reverse=True,
-    )
-    top = pool[:n_slots]
-    return sum(top) / len(top) if top else 0.0
-
-
 def _position_weakness(teams, players, my_roster_id):
     """position -> Schwäche (>0 heißt: unterdurchschnittlich, Waiver-Bedarf)."""
-    strengths_by_pos = {pos: {} for pos in STARTER_SLOTS_BY_POS}
-    for team in teams:
-        for pos in STARTER_SLOTS_BY_POS:
-            strengths_by_pos[pos][team["roster_id"]] = _effective_strength(team["players"], pos, players)
-
-    weakness = {}
-    for pos, by_team in strengths_by_pos.items():
-        league_avg = sum(by_team.values()) / len(by_team) if by_team else 0.0
-        mine = by_team.get(my_roster_id, 0.0)
-        weakness[pos] = round(max(0.0, league_avg - mine), 2)
-    return weakness
+    return weakness_matrix(teams, players).get(my_roster_id, {})
 
 
 def _reasons(p, weakness_for_pos, pos_avg_season):
