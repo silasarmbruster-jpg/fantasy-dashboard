@@ -1,0 +1,14 @@
+{
+  "name": "Fantasy Dashboard",
+  "short_name": "Fantasy HQ",
+  "description": "Fantasy-Football-Dashboard für die Sleeper-Liga",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f6fb",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

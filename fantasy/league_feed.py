@@ -1,7 +1,10 @@
-"""Aufbereitung für den Liga-Tab: Power-Ranking nach Roster-Wert und eine
-lesbare Transaktions-Historie aus den rohen Sleeper-Transaktionen."""
+"""Aufbereitung für den Liga-Tab: Power-Ranking nach Roster-Wert, eine
+lesbare Transaktions-Historie und Scouting-Profile je Manager (Waiver-/
+Trade-Aktivität, Positionsbedarf und -überschuss)."""
 
 MAX_TRANSACTIONS = 25
+SCOUTING_POSITIONS = ("QB", "RB", "WR", "TE")
+SURPLUS_RANK_THRESHOLD = 3  # Top-3-Rang der Liga an einer Position gilt als Überschuss
 
 
 def power_ranking(teams):
@@ -63,3 +66,54 @@ def normalize_transactions(transactions, roster_by_id):
 
     out.sort(key=lambda t: t.get("created") or 0, reverse=True)
     return out[:MAX_TRANSACTIONS]
+
+
+def scouting_profiles(teams, raw_transactions, weakness_matrix, position_rank_matrix):
+    """roster_id -> Scouting-Profil: Waiver-/Trade-Aktivität aus den rohen
+    Transaktionen dieser Saison, Positionsbedarf (aus weakness_matrix) und
+    Positions-Überschuss (Top-3-Liga-Rang laut position_rank_matrix)."""
+    waiver_counts = {t["roster_id"]: 0 for t in teams}
+    trade_counts = {t["roster_id"]: 0 for t in teams}
+
+    for tx in raw_transactions:
+        if tx.get("status") != "complete":
+            continue
+        tx_type = tx.get("type")
+        roster_ids = set(tx.get("roster_ids") or [])
+        if tx_type == "trade":
+            for rid in roster_ids:
+                if rid in trade_counts:
+                    trade_counts[rid] += 1
+        elif tx_type in ("waiver", "free_agent"):
+            for rid in roster_ids:
+                if rid in waiver_counts:
+                    waiver_counts[rid] += 1
+
+    rank_by_pos_team = {}
+    for pos, ranked in position_rank_matrix.items():
+        for entry in ranked:
+            rank_by_pos_team.setdefault(entry["roster_id"], {})[pos] = entry["rank"]
+
+    profiles = []
+    for t in teams:
+        rid = t["roster_id"]
+        tw = weakness_matrix.get(rid, {})
+        ranks = rank_by_pos_team.get(rid, {})
+        needs = sorted(
+            [p for p in SCOUTING_POSITIONS if tw.get(p, 0) >= 1.5],
+            key=lambda p: tw.get(p, 0), reverse=True,
+        )
+        surplus = sorted(
+            [p for p in SCOUTING_POSITIONS if ranks.get(p, 99) <= SURPLUS_RANK_THRESHOLD],
+            key=lambda p: ranks.get(p, 99),
+        )
+        profiles.append({
+            "roster_id": rid,
+            "team_name": t["team_name"],
+            "waiver_moves": waiver_counts.get(rid, 0),
+            "trades": trade_counts.get(rid, 0),
+            "needs": needs,
+            "surplus": surplus,
+        })
+    profiles.sort(key=lambda p: p["team_name"])
+    return profiles

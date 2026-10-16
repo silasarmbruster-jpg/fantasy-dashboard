@@ -21,13 +21,19 @@ def load(path):
         return {"runs": []}
 
 
-def append_and_save(path, run_date, trade_values):
+def build_updated(path, run_date, trade_values):
+    """Hängt den aktuellen Lauf im Speicher an, schreibt aber noch nichts auf
+    die Platte - das macht erst save(), nachdem die Plausibilitätsprüfung
+    des Build-Laufs bestanden hat."""
     hist = load(path)
     values = {pid: tv["value"] for pid, tv in trade_values.items() if tv.get("value") is not None}
     hist["runs"].append({"date": run_date, "values": values})
     hist["runs"] = hist["runs"][-MAX_RUNS:]
-    path.write_text(json.dumps(hist, separators=(",", ":")), encoding="utf-8")
     return hist
+
+
+def save(path, hist):
+    path.write_text(json.dumps(hist, separators=(",", ":")), encoding="utf-8")
 
 
 def player_histories(hist, player_ids):

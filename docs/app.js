@@ -13,6 +13,7 @@
     { id: "sellbuy", label: "Sell/Buy", icon: "📊" },
     { id: "league", label: "Liga", icon: "🏆" },
     { id: "planner", label: "Planer", icon: "🗓️" },
+    { id: "live", label: "Live", icon: "📡" },
   ];
 
   const STATUS_LABELS = {
@@ -118,6 +119,8 @@
       root.appendChild(renderError("Daten konnten nicht geladen werden."));
       return;
     }
+    const banner = renderDataFreshnessBanner();
+    if (banner) root.appendChild(banner);
     if (tabId === "overview") root.appendChild(renderOverview());
     else if (tabId === "roster") root.appendChild(renderRoster());
     else if (tabId === "players") root.appendChild(renderPlayers());
@@ -128,6 +131,7 @@
     else if (tabId === "sellbuy") root.appendChild(renderSellBuy());
     else if (tabId === "league") root.appendChild(renderLeague());
     else if (tabId === "planner") root.appendChild(renderPlanner());
+    else if (tabId === "live") root.appendChild(renderLive());
   }
 
   function renderNav(activeId) {
@@ -152,6 +156,33 @@
     TABS.forEach((t, idx) => {
       mobileHost.children[idx].addEventListener("click", () => navigateTo(t.id));
     });
+  }
+
+  const SOURCE_LABELS_DE = {
+    schedule: "NFL-Spielplan",
+    trending: "Trending Adds/Drops",
+    weekly_stats: "Wochenstatistiken",
+    projections: "Projections",
+    fantasycalc: "FantasyCalc Trade-Werte",
+    future_matchups: "Künftige Matchups",
+    historical_matchups: "Historische Matchups",
+    transactions: "Transaktionen",
+    vegas_odds: "Vegas-Odds",
+  };
+
+  function renderDataFreshnessBanner() {
+    const status = (DATA.meta && DATA.meta.source_status) || {};
+    const failed = Object.entries(status).filter(([, v]) => v !== "ok");
+    if (!failed.length) return null;
+    return el("div", { class: "card", style: "border-left:4px solid var(--status-warn);margin-bottom:16px;" }, [
+      el("div", { style: "font-weight:700;font-size:13px;margin-bottom:4px;" }, "⚠️ Einzelne Datenquellen hatten beim letzten Build-Lauf Probleme"),
+      el(
+        "ul",
+        { style: "margin:4px 0 0;padding-left:18px;font-size:12px;color:var(--text-muted);" },
+        failed.map(([key, msg]) => el("li", {}, `${SOURCE_LABELS_DE[key] || key}: ${msg}`))
+      ),
+      el("div", { style: "font-size:11px;color:var(--text-faint);margin-top:6px;" }, "Betroffene Werte nutzen Fallbacks (leer/vorheriger Stand) statt erfundener Daten."),
+    ]);
   }
 
   function renderError(msg) {
@@ -181,10 +212,11 @@
       ]),
     ];
     if (opts && opts.showPlayoffNote) {
+      const myPlayoff = (DATA.playoffs?.results || []).find((r) => r.roster_id === me.roster_id);
       stats.push(
         el("div", { class: "header-stat" }, [
-          el("div", { class: "value", style: "font-size:15px;color:var(--text-faint);" }, "—"),
-          el("div", { class: "label" }, "Playoff-Chance (ab Phase 4)"),
+          el("div", { class: "value" }, myPlayoff ? `${myPlayoff.playoff_probability}%` : "–"),
+          el("div", { class: "label" }, "Playoff-Chance"),
         ])
       );
     }
@@ -640,6 +672,7 @@
     positions: new Set(),
     availability: "all", // all | free | rostered
     injuredOnly: false,
+    favoritesOnly: false,
     sortKey: "season_total",
     sortDir: "desc",
   };
@@ -713,6 +746,19 @@
     ]);
     filterBar.appendChild(injuryLabel);
 
+    const favLabel = el("label", { style: "display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-muted);" }, [
+      el("input", {
+        type: "checkbox",
+        checked: playersView.favoritesOnly ? "checked" : null,
+        onchange: (e) => {
+          playersView.favoritesOnly = e.target.checked;
+          refreshTable();
+        },
+      }),
+      "★ nur Favoriten",
+    ]);
+    filterBar.appendChild(favLabel);
+
     frag.appendChild(filterBar);
 
     const tableHost = el("div", {});
@@ -762,6 +808,7 @@
     if (playersView.availability === "free") list = list.filter((p) => !p.fantasy_team);
     if (playersView.availability === "rostered") list = list.filter((p) => p.fantasy_team);
     if (playersView.injuredOnly) list = list.filter((p) => p.injury_status);
+    if (playersView.favoritesOnly) list = list.filter((p) => isFavorite(p.id));
 
     const { sortKey, sortDir } = playersView;
     list.sort((a, b) => {
@@ -804,7 +851,7 @@
     const rows = list.map((p) => {
       const st = statusInfo(p);
       return el("tr", {}, [
-        el("td", {}, playerTag(p.id)),
+        el("td", {}, [isFavorite(p.id) ? el("span", { style: "color:#f5b800;margin-right:4px;" }, "★") : null, playerTag(p.id)].filter(Boolean)),
         el("td", {}, p.position),
         el("td", {}, p.team || "–"),
         el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), " ", p.fantasy_team ? p.fantasy_team.team_name : "Frei"]),
@@ -933,6 +980,35 @@
       }
     };
     reader.readAsText(file);
+  }
+
+  // ---------- Favoriten & Notizen (localStorage, geräteweit) ----------
+  const FAVORITES_KEY = "favoritesAndNotes";
+  function loadFavorites() {
+    try {
+      const raw = localStorage.getItem(FAVORITES_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return { favorites: parsed.favorites || [], notes: parsed.notes || {} };
+      }
+    } catch (e) { /* ignore */ }
+    return { favorites: [], notes: {} };
+  }
+  const favoritesState = loadFavorites();
+  function saveFavorites() {
+    try { localStorage.setItem(FAVORITES_KEY, JSON.stringify(favoritesState)); } catch (e) { /* ignore */ }
+  }
+  function isFavorite(pid) { return favoritesState.favorites.includes(pid); }
+  function toggleFavorite(pid) {
+    if (isFavorite(pid)) favoritesState.favorites = favoritesState.favorites.filter((x) => x !== pid);
+    else favoritesState.favorites.push(pid);
+    saveFavorites();
+  }
+  function getNote(pid) { return favoritesState.notes[pid] || ""; }
+  function setNote(pid, text) {
+    if (text && text.trim()) favoritesState.notes[pid] = text;
+    else delete favoritesState.notes[pid];
+    saveFavorites();
   }
 
   function combosOf(arr, size) {
@@ -1631,6 +1707,12 @@
       ])
     );
 
+    frag.appendChild(el("div", { class: "section-label" }, "Positionsstärke je Team"));
+    frag.appendChild(renderPositionStrengthMatrix());
+
+    frag.appendChild(el("div", { class: "section-label" }, "Scouting-Profile"));
+    frag.appendChild(renderScoutingProfiles());
+
     frag.appendChild(el("div", { class: "section-label" }, "Rosters"));
     const teamPicker = el(
       "div",
@@ -1668,6 +1750,62 @@
     }
 
     return frag;
+  }
+
+  function renderPositionStrengthMatrix() {
+    const ps = DATA.position_strength;
+    const rankByTeam = {};
+    DATA.teams.forEach((t) => (rankByTeam[t.roster_id] = { team_name: t.team_name, roster_id: t.roster_id }));
+    POSITIONS.forEach((pos) => {
+      (ps[pos] || []).forEach((e) => {
+        if (rankByTeam[e.roster_id]) rankByTeam[e.roster_id][pos] = e.rank;
+      });
+    });
+    const rows = Object.values(rankByTeam)
+      .sort((a, b) => a.team_name.localeCompare(b.team_name))
+      .map((t) =>
+        el("tr", { style: t.roster_id === DATA.me.roster_id ? "background:var(--accent-soft);" : "" }, [
+          el("td", { style: "font-weight:700;" }, t.team_name),
+          ...POSITIONS.map((pos) => {
+            const rank = t[pos];
+            const color = !rank ? "var(--text-faint)" : rank <= 4 ? "var(--status-good)" : rank <= 10 ? "var(--status-warn)" : "var(--status-bad)";
+            return el("td", { style: `text-align:center;color:${color};font-weight:700;` }, rank ? `#${rank}` : "–");
+          }),
+        ])
+      );
+    return el("div", { class: "card table-wrap" }, [
+      el("table", { class: "data-table" }, [
+        el("thead", {}, el("tr", {}, [el("th", {}, "Team"), ...POSITIONS.map((pos) => el("th", { style: "text-align:center;" }, pos))])),
+        el("tbody", {}, rows),
+      ]),
+      el("div", { style: "font-size:11px;color:var(--text-muted);margin-top:8px;" }, "Rang 1 = stärkste Position der Liga (grün), Rang > 10 = schwach (rot)."),
+    ]);
+  }
+
+  function renderScoutingProfiles() {
+    const profiles = DATA.league_feed.scouting_profiles || [];
+    if (!profiles.length) return el("div", { class: "card empty-state" }, "Keine Scouting-Daten verfügbar.");
+    return el(
+      "div",
+      { class: "grid grid-3" },
+      profiles.map((p) =>
+        el("div", { class: "card", style: "margin-bottom:0;" }, [
+          el("div", { style: "font-weight:800;font-size:14px;margin-bottom:8px;" }, p.team_name),
+          el("div", { style: "display:flex;gap:16px;margin-bottom:8px;" }, [
+            el("div", {}, [el("div", { style: "font-size:18px;font-weight:800;" }, p.waiver_moves), el("div", { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;" }, "Waiver-Moves")]),
+            el("div", {}, [el("div", { style: "font-size:18px;font-weight:800;" }, p.trades), el("div", { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;" }, "Trades")]),
+          ]),
+          el("div", { style: "font-size:12px;" }, [
+            el("strong", {}, "Bedarf: "),
+            p.needs.length ? p.needs.join(", ") : "keiner erkennbar",
+          ]),
+          el("div", { style: "font-size:12px;margin-top:4px;" }, [
+            el("strong", {}, "Überschuss: "),
+            p.surplus.length ? p.surplus.join(", ") : "keiner erkennbar",
+          ]),
+        ])
+      )
+    );
   }
 
   function renderTeamRosterCard(rosterId) {
@@ -1729,6 +1867,12 @@
     const frag = el("div", {});
     frag.appendChild(renderHeader());
 
+    frag.appendChild(el("div", { class: "section-label" }, "Playoff-Wahrscheinlichkeit"));
+    frag.appendChild(renderPlayoffOddsCard());
+
+    frag.appendChild(el("div", { class: "section-label" }, "Matchup-Vorhersage (nächste Wochen)"));
+    frag.appendChild(renderMatchupForecastCard());
+
     frag.appendChild(el("div", { class: "section-label" }, "Restprogramm (Fantasy-Gegner)"));
     const rest = DATA.planner.remaining_schedule;
     if (!rest.length) {
@@ -1764,19 +1908,190 @@
         el(
           "div",
           { class: "grid grid-3" },
-          upcoming.map((wk) =>
-            el("div", { class: "card", style: "margin-bottom:0;" }, [
-              el("div", { style: "font-weight:800;font-size:14px;margin-bottom:8px;" }, `Woche ${wk}`),
+          upcoming.map((wk) => {
+            const nearPlayoffs = (DATA.planner.byes_near_playoffs || []).includes(wk);
+            return el("div", { class: "card", style: `margin-bottom:0;${nearPlayoffs ? "border-left:4px solid var(--status-warn);" : ""}` }, [
+              el("div", { style: "font-weight:800;font-size:14px;margin-bottom:8px;" }, [
+                `Woche ${wk}`,
+                nearPlayoffs ? el("span", { style: "color:var(--status-warn);font-weight:700;font-size:11px;margin-left:8px;" }, "⚠️ kurz vor Playoffs") : null,
+              ].filter(Boolean)),
               el(
                 "div",
                 { style: "display:flex;flex-direction:column;gap:6px;" },
                 byeCalendar[String(wk)].map((pid) => el("div", {}, playerLabel(pid)))
               ),
-            ])
-          )
+            ]);
+          })
         )
       );
     }
+
+    return frag;
+  }
+
+  function renderPlayoffOddsCard() {
+    const po = DATA.playoffs;
+    if (!po || !po.results || !po.results.length) {
+      return el("div", { class: "card empty-state" }, "Keine Playoff-Simulation verfügbar.");
+    }
+    const myEntry = po.results.find((r) => r.roster_id === DATA.me.roster_id);
+    const rows = po.results.map((r) =>
+      el("tr", { style: r.roster_id === DATA.me.roster_id ? "background:var(--accent-soft);" : "" }, [
+        el("td", { style: "font-weight:700;" }, r.team_name),
+        el("td", {}, `${r.current_wins}-${r.current_losses}`),
+        el("td", {}, [
+          el("div", { style: "display:flex;align-items:center;gap:8px;" }, [
+            el("div", { style: "flex:1;max-width:120px;background:var(--accent-soft);border-radius:6px;height:10px;overflow:hidden;" }, [
+              el("div", { style: `width:${r.playoff_probability}%;height:100%;background:${r.playoff_probability >= 50 ? "var(--status-good)" : "var(--status-bad)"};border-radius:6px;` }),
+            ]),
+            el("span", { style: "font-weight:700;font-size:12.5px;width:46px;" }, `${r.playoff_probability}%`),
+          ]),
+        ]),
+        el("td", {}, fmt1(r.projected_final_wins)),
+      ])
+    );
+    return el("div", {}, [
+      myEntry
+        ? el("div", { class: "card", style: `border-left:4px solid ${myEntry.playoff_probability >= 50 ? "var(--status-good)" : "var(--status-bad)"};` }, [
+            el("div", { style: "font-size:28px;font-weight:800;" }, `${myEntry.playoff_probability}%`),
+            el("div", { style: "font-size:12.5px;color:var(--text-muted);" }, `Playoff-Chance von ${DATA.me.team_name} · voraussichtlich ${fmt1(myEntry.projected_final_wins)} Siege am Saisonende`),
+          ])
+        : null,
+      el("div", { class: "card table-wrap", style: "margin-top:10px;" }, [
+        el("table", { class: "data-table" }, [
+          el("thead", {}, el("tr", {}, [el("th", {}, "Team"), el("th", {}, "Bilanz"), el("th", {}, "Playoff-Chance"), el("th", {}, "Ø Siege (Hochrechnung)")])),
+          el("tbody", {}, rows),
+        ]),
+      ]),
+      el("div", { style: "font-size:11px;color:var(--text-muted);margin-top:8px;" }, `${po.method_note} (${po.trials.toLocaleString("de-DE")} Durchläufe, ${po.playoff_teams} Playoff-Plätze.)`),
+    ].filter(Boolean));
+  }
+
+  function renderMatchupForecastCard() {
+    const forecast = DATA.planner.matchup_forecast || [];
+    if (!forecast.length) {
+      return el("div", { class: "card empty-state" }, "Kein Restprogramm für eine Vorhersage verfügbar.");
+    }
+    const rows = forecast.map((f) => {
+      const wp = f.win_probability_me;
+      const color = wp == null ? "var(--text-faint)" : wp >= 60 ? "var(--status-good)" : wp <= 40 ? "var(--status-bad)" : "var(--status-warn)";
+      return el("div", { class: "card", style: `margin-bottom:10px;border-left:4px solid ${color};` }, [
+        el("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;" }, [
+          el("div", {}, [
+            el("span", { style: "font-weight:700;" }, `Woche ${f.week}`),
+            ` vs. ${f.opponent_team_name || "–"}`,
+          ]),
+          wp != null ? el("div", { style: `font-weight:800;color:${color};` }, `${wp}% Sieg-Chance`) : el("div", { style: "color:var(--text-faint);font-size:12px;" }, "Gegner unbekannt"),
+        ]),
+        el("div", { style: "font-size:12.5px;color:var(--text-muted);margin-top:6px;" }, `Projektion: ${fmt1(f.my_projected_points)} vs. ${f.opponent_projected_points != null ? fmt1(f.opponent_projected_points) : "–"} Pkt.`),
+      ]);
+    });
+    return el("div", {}, [
+      ...rows,
+      el("div", { style: "font-size:11px;color:var(--text-muted);margin-top:4px;" }, DATA.planner.forecast_note),
+    ]);
+  }
+
+  // ---------- Live (experimentell, holt Live-Scores direkt vom Browser) ----------
+  // Sleeper erlaubt CORS von jedem Origin (access-control-allow-origin: *),
+  // daher kann die Matchups-Antwort für die laufende Woche direkt aus dem
+  // Browser geladen werden, ohne den täglichen Build-Lauf abzuwarten. Das
+  // ist nur während laufender NFL-Spiele aussagekräftig (sonst stehen die
+  // Werte aus data.json und hier praktisch gleich).
+  let liveRefreshTimer = null;
+  let liveState = { loading: false, error: null, matchups: null, fetchedAt: null };
+
+  async function fetchLiveMatchups() {
+    liveState.loading = true;
+    liveState.error = null;
+    renderLiveHost();
+    try {
+      const res = await fetch(`https://api.sleeper.app/v1/league/${DATA.league.league_id}/matchups/${DATA.league.week}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      liveState.matchups = await res.json();
+      liveState.fetchedAt = new Date();
+    } catch (e) {
+      liveState.error = "Live-Daten konnten nicht geladen werden (" + e.message + "). Sleeper evtl. nicht erreichbar.";
+    } finally {
+      liveState.loading = false;
+      renderLiveHost();
+    }
+  }
+
+  function renderLiveHost() {
+    const host = $("#live-host");
+    if (!host) return;
+    host.innerHTML = "";
+    host.appendChild(buildLiveBody());
+  }
+
+  function buildLiveBody() {
+    if (liveState.loading && !liveState.matchups) {
+      return el("div", { class: "card empty-state" }, "Lade Live-Scores …");
+    }
+    if (liveState.error) {
+      return el("div", { class: "card empty-state" }, liveState.error);
+    }
+    if (!liveState.matchups || !liveState.matchups.length) {
+      return el("div", { class: "card empty-state" }, "Keine Live-Daten für die aktuelle Woche verfügbar (Woche evtl. noch nicht gestartet).");
+    }
+    const teamNameByRoster = {};
+    DATA.teams.forEach((t) => (teamNameByRoster[t.roster_id] = t.team_name));
+
+    const byMatchup = {};
+    liveState.matchups.forEach((m) => {
+      (byMatchup[m.matchup_id] = byMatchup[m.matchup_id] || []).push(m);
+    });
+
+    const cards = Object.values(byMatchup).map((pair) => {
+      const [a, b] = pair.sort((x, y) => (y.points || 0) - (x.points || 0));
+      const nameA = teamNameByRoster[a.roster_id] || `Team ${a.roster_id}`;
+      const nameB = b ? (teamNameByRoster[b.roster_id] || `Team ${b.roster_id}`) : null;
+      const isMineA = a.roster_id === DATA.me.roster_id;
+      const isMineB = b && b.roster_id === DATA.me.roster_id;
+      return el("div", { class: "card", style: (isMineA || isMineB) ? "border-left:4px solid var(--accent);" : "" }, [
+        el("div", { style: "display:flex;justify-content:space-between;align-items:center;" }, [
+          el("div", { style: `font-weight:${isMineA ? "800" : "600"};` }, nameA),
+          el("div", { style: "font-size:20px;font-weight:800;" }, fmt1(a.points || 0)),
+        ]),
+        b
+          ? el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-top:6px;" }, [
+              el("div", { style: `font-weight:${isMineB ? "800" : "600"};` }, nameB),
+              el("div", { style: "font-size:20px;font-weight:800;" }, fmt1(b.points || 0)),
+            ])
+          : el("div", { style: "color:var(--text-faint);font-size:12px;margin-top:6px;" }, "Kein Gegner gefunden."),
+      ]);
+    });
+
+    return el("div", {}, [
+      el("div", { class: "grid grid-2" }, cards),
+      liveState.fetchedAt
+        ? el("div", { style: "font-size:11px;color:var(--text-muted);margin-top:10px;" }, `Zuletzt live geladen: ${liveState.fetchedAt.toLocaleTimeString("de-DE")}`)
+        : null,
+    ].filter(Boolean));
+  }
+
+  function renderLive() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+    frag.appendChild(
+      el("div", { class: "card", style: "margin-bottom:16px;border-left:4px solid var(--status-warn);" }, [
+        el("div", { style: "font-weight:700;font-size:13px;" }, "📡 Experimentell: Live-Scores direkt von Sleeper"),
+        el("div", { style: "font-size:12px;color:var(--text-muted);margin-top:4px;" }, "Lädt die aktuelle Woche direkt im Browser von der öffentlichen Sleeper-API (nicht aus data.json). Nur während laufender NFL-Spiele aussagekräftig."),
+      ])
+    );
+    const btnRow = el("div", { style: "display:flex;gap:8px;align-items:center;margin-bottom:16px;" }, [
+      el("button", { class: "btn", onclick: () => fetchLiveMatchups() }, "🔄 Jetzt aktualisieren"),
+    ]);
+    frag.appendChild(btnRow);
+    frag.appendChild(el("div", { id: "live-host" }, [buildLiveBody()]));
+
+    if (!liveState.matchups && !liveState.loading) fetchLiveMatchups();
+    if (liveRefreshTimer) clearInterval(liveRefreshTimer);
+    liveRefreshTimer = setInterval(() => {
+      if (currentTabId() === "live") fetchLiveMatchups();
+      else clearInterval(liveRefreshTimer);
+    }, 30000);
 
     return frag;
   }
@@ -2147,6 +2462,13 @@
 
     panel.innerHTML = "";
     panel.appendChild(el("button", { class: "btn panel-close", onclick: closePlayerDetail }, "✕"));
+    const favBtn = el("button", {
+      class: "btn panel-close",
+      style: "right:56px;",
+      title: isFavorite(pid) ? "Favorit entfernen" : "Als Favorit markieren",
+      onclick: () => { toggleFavorite(pid); openPlayerDetail(pid); },
+    }, isFavorite(pid) ? "★" : "☆");
+    panel.appendChild(favBtn);
     panel.appendChild(
       el("div", { class: "panel-head" }, [
         playerAvatar(p, "lg"),
@@ -2246,6 +2568,16 @@
     }
     refreshTradeBlockButtons();
     panel.appendChild(tbHost);
+
+    panel.appendChild(el("div", { class: "section-label" }, "Notizen"));
+    const noteBox = el("textarea", {
+      class: "note-textarea",
+      placeholder: "Private Notiz zu diesem Spieler (nur auf diesem Gerät gespeichert)…",
+      style: "width:100%;min-height:64px;padding:8px;border-radius:8px;border:1px solid var(--card-border);background:var(--card-bg);color:var(--text);font:inherit;resize:vertical;",
+      onchange: (e) => setNote(pid, e.target.value),
+    });
+    noteBox.value = getNote(pid);
+    panel.appendChild(noteBox);
 
     panel.appendChild(
       el("div", { style: "margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;" }, [
