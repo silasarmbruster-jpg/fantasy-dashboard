@@ -297,6 +297,54 @@ def test_value_breakdown_deadline_total_bounded_by_weeks_times_max_delta():
     assert b["until_deadline_total"] <= len(deadline_weeks) * max_delta + 1e-6
 
 
+def test_value_breakdown_rest_of_season_covers_gap_weeks_between_deadline_and_playoffs():
+    # Wochen 12/13 liegen zwischen Trade-Deadline (11) und Playoff-Start (14)
+    # und tauchen in keiner der beiden Teilmengen auf - "Rest of Season" muss
+    # sie trotzdem mitzählen, sonst fehlt ein Teil der Saison in der Summe.
+    players, roster_positions, flex_positions, before_ids = _consistency_ctx()
+    after_ids = [pid for pid in before_ids if pid != "bench_old"] + ["bench_new"]
+    before_ids_final = [pid for pid in before_ids if pid != "bench_new"]
+    current_week = 8
+    deadline_weeks = [8, 9, 10, 11]
+    playoff_weeks = [14, 15, 16, 17]
+    rest_of_season_weeks = list(range(8, 18))  # 8..17, inkl. der Lücke 12/13
+    b = tf._value_breakdown(
+        before_ids_final, after_ids, players, roster_positions, flex_positions,
+        current_week, deadline_weeks, playoff_weeks, rest_of_season_weeks,
+    )
+    assert "rest_of_season_total" in b
+    week_numbers = {w["week"] for w in b["weeks"]}
+    assert {12, 13}.issubset(week_numbers)
+    expected = round(sum(w["delta"] for w in b["weeks"] if w["week"] in rest_of_season_weeks), 2)
+    assert b["rest_of_season_total"] == expected
+    # Rest of Season deckt strikt mehr Wochen ab als Deadline+Playoffs allein.
+    assert len(rest_of_season_weeks) > len(set(deadline_weeks) | set(playoff_weeks))
+
+
+def test_rest_of_season_player_value_scales_with_weeks_and_season_avg():
+    p_high = make_player("p1", "WR", season_avg=20.0, avg_last3=20.0)
+    p_low = make_player("p2", "WR", season_avg=5.0, avg_last3=5.0)
+    assert tf._rest_of_season_player_value(p_high, 10) > tf._rest_of_season_player_value(p_low, 10)
+    assert tf._rest_of_season_player_value(p_high, 10) > tf._rest_of_season_player_value(p_high, 2)
+    assert tf._rest_of_season_player_value(p_high, 0) == 0.0
+
+
+def test_rest_of_season_player_value_discounts_injury_and_bad_trend():
+    healthy = make_player("p1", "WR", season_avg=10.0, avg_last3=10.0, injury_status=None)
+    hurt = make_player("p2", "WR", season_avg=10.0, avg_last3=10.0, injury_status="Questionable")
+    cold = make_player("p3", "WR", season_avg=10.0, avg_last3=5.0)
+    assert tf._rest_of_season_player_value(hurt, 8) < tf._rest_of_season_player_value(healthy, 8)
+    assert tf._rest_of_season_player_value(cold, 8) < tf._rest_of_season_player_value(healthy, 8)
+
+
+def test_score_ranks_by_rest_of_season_not_this_week():
+    # Paket A: schlecht diese Woche, aber stark über den Rest der Saison.
+    # Paket B: umgekehrt. Der Fokus muss auf Rest of Season liegen (A > B).
+    a = {"rest_of_season_proxy": 50.0, "lineup_delta": -5.0, "their_lineup_delta": 0, "is_playoff_rival": False}
+    b = {"rest_of_season_proxy": 5.0, "lineup_delta": 20.0, "their_lineup_delta": 0, "is_playoff_rival": False}
+    assert tf._score(a) > tf._score(b)
+
+
 # ---------------------------------------------------------------------------
 # validate_proposals (Build-Gate)
 # ---------------------------------------------------------------------------
