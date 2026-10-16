@@ -6,8 +6,8 @@
     { id: "overview", label: "Übersicht", icon: "🏠", ready: true },
     { id: "roster", label: "Mein Roster", icon: "👤", ready: true },
     { id: "startsit", label: "Start/Sit", icon: "🔁", ready: false, phase: "Phase 3" },
-    { id: "waiver", label: "Waiver Wire", icon: "📈", ready: false, phase: "Phase 2" },
-    { id: "players", label: "Alle Spieler", icon: "📋", ready: false, phase: "Phase 2" },
+    { id: "waiver", label: "Waiver Wire", icon: "📈", ready: true },
+    { id: "players", label: "Alle Spieler", icon: "📋", ready: true },
     { id: "tradefinder", label: "Trade Finder", icon: "🔄", ready: false, phase: "Phase 4" },
     { id: "tradeanalyzer", label: "Trade-Analyzer", icon: "⚖️", ready: false, phase: "Phase 4" },
     { id: "league", label: "Liga", icon: "🏆", ready: false, phase: "Phase 5" },
@@ -38,7 +38,7 @@
     }
     for (const c of [].concat(children)) {
       if (c === null || c === undefined) continue;
-      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+      node.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
     }
     return node;
   }
@@ -87,6 +87,8 @@
     }
     if (tabId === "overview") root.appendChild(renderOverview());
     else if (tabId === "roster") root.appendChild(renderRoster());
+    else if (tabId === "players") root.appendChild(renderPlayers());
+    else if (tabId === "waiver") root.appendChild(renderWaiver());
   }
 
   function renderNav(activeId) {
@@ -171,7 +173,7 @@
     const grid = el("div", { class: "grid grid-2" });
     grid.appendChild(renderInjuryAlertsCard());
     grid.appendChild(renderTrendingCard());
-    grid.appendChild(renderComingSoonMiniCard("Top Waiver-Tipps", "📈", "waiver", "Phase 2"));
+    grid.appendChild(renderWaiverTipsCard());
     grid.appendChild(renderComingSoonMiniCard("Start/Sit-Hinweise", "🔁", "startsit", "Phase 3"));
     frag.appendChild(grid);
 
@@ -293,6 +295,29 @@
     ]);
   }
 
+  function renderWaiverTipsCard() {
+    const top = (DATA.waiver.top_overall || []).slice(0, 3);
+    const body = top.length
+      ? el(
+          "div",
+          { class: "mini-list" },
+          top.map((e) => {
+            const p = DATA.players[e.player_id];
+            return el("div", { class: "mini-item", style: "display:block;" }, [
+              el("div", { style: "display:flex;justify-content:space-between;" }, [
+                el("div", {}, [posChip(p.position), " ", playerLink(e.player_id)]),
+              ]),
+              el("div", { class: "reason" }, e.reasons[0]),
+            ]);
+          })
+        )
+      : el("div", { class: "empty-state" }, "Keine Waiver-Empfehlungen verfügbar.");
+    return el("div", { class: "card" }, [
+      el("div", { class: "card-title" }, ["Top Waiver-Tipps", el("button", { class: "see-all", onclick: () => navigateTo("waiver") }, "Alle ansehen")]),
+      body,
+    ]);
+  }
+
   function renderComingSoonMiniCard(title, icon, tabId, phase) {
     return el("div", { class: "card" }, [
       el("div", { class: "card-title" }, [title, el("button", { class: "see-all", onclick: () => navigateTo(tabId) }, "Alle ansehen")]),
@@ -365,6 +390,257 @@
     ]);
   }
 
+  // ---------- Alle Spieler ----------
+  const POSITIONS = ["QB", "RB", "WR", "TE", "K", "DEF"];
+  const playersView = {
+    search: "",
+    positions: new Set(),
+    availability: "all", // all | free | rostered
+    injuredOnly: false,
+    sortKey: "season_total",
+    sortDir: "desc",
+  };
+
+  function renderPlayers() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+    frag.appendChild(el("div", { class: "card-title", style: "margin-bottom:0;" }, "Alle Spieler"));
+
+    const filterBar = el("div", { class: "card", style: "display:flex;gap:10px;flex-wrap:wrap;align-items:center;" });
+    const searchInput = el("input", {
+      type: "text",
+      placeholder: "Spieler suchen…",
+      value: playersView.search,
+      style: "flex:1;min-width:160px;padding:8px 10px;border-radius:8px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);",
+      oninput: (e) => {
+        playersView.search = e.target.value;
+        refreshTable();
+      },
+    });
+    filterBar.appendChild(searchInput);
+
+    const posWrap = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;" });
+    POSITIONS.forEach((pos) => {
+      const active = playersView.positions.has(pos);
+      const btn = el(
+        "button",
+        {
+          class: "btn",
+          style: active ? "background:var(--accent);border-color:var(--accent);color:#fff;" : "",
+          onclick: () => {
+            if (playersView.positions.has(pos)) playersView.positions.delete(pos);
+            else playersView.positions.add(pos);
+            renderFilterBar();
+            refreshTable();
+          },
+        },
+        pos
+      );
+      posWrap.appendChild(btn);
+    });
+    filterBar.appendChild(posWrap);
+
+    const availSelect = el(
+      "select",
+      {
+        style: "padding:8px 10px;border-radius:8px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);",
+        onchange: (e) => {
+          playersView.availability = e.target.value;
+          refreshTable();
+        },
+      },
+      [
+        el("option", { value: "all", selected: playersView.availability === "all" ? "selected" : null }, "Alle"),
+        el("option", { value: "free", selected: playersView.availability === "free" ? "selected" : null }, "Nur verfügbar"),
+        el("option", { value: "rostered", selected: playersView.availability === "rostered" ? "selected" : null }, "Nur vergeben"),
+      ]
+    );
+    filterBar.appendChild(availSelect);
+
+    const injuryLabel = el("label", { style: "display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-muted);" }, [
+      el("input", {
+        type: "checkbox",
+        checked: playersView.injuredOnly ? "checked" : null,
+        onchange: (e) => {
+          playersView.injuredOnly = e.target.checked;
+          refreshTable();
+        },
+      }),
+      "nur verletzt/fraglich",
+    ]);
+    filterBar.appendChild(injuryLabel);
+
+    frag.appendChild(filterBar);
+
+    const tableHost = el("div", {});
+    frag.appendChild(tableHost);
+
+    function renderFilterBar() {
+      // Positions-Buttons neu zeichnen (aktiver Zustand)
+      const newBar = renderPlayers();
+      frag.replaceWith(newBar);
+    }
+
+    function refreshTable() {
+      tableHost.innerHTML = "";
+      tableHost.appendChild(buildPlayersTable());
+    }
+
+    tableHost.appendChild(buildPlayersTable());
+    return frag;
+  }
+
+  const PLAYERS_COLUMNS = [
+    { key: "name", label: "Spieler", sortable: false },
+    { key: "position", label: "Pos", sortable: true },
+    { key: "team", label: "Team", sortable: true },
+    { key: "avail", label: "Verfügbar", sortable: false },
+    { key: "season_total", label: "Punkte", sortable: true },
+    { key: "season_avg", label: "Ø", sortable: true },
+    { key: "targets_pg", label: "Targets/Sp.", sortable: true },
+    { key: "snap_pct", label: "Snap %", sortable: true },
+    { key: "touches_pg", label: "Touches/Sp.", sortable: true },
+    { key: "redzone_pg", label: "RZ/Sp.", sortable: true },
+    { key: "projection_week", label: "Proj.", sortable: true },
+    { key: "trade_value", label: "Trade-Wert", sortable: true },
+  ];
+
+  function buildPlayersTable() {
+    let list = Object.values(DATA.players);
+
+    if (playersView.search.trim()) {
+      const q = playersView.search.trim().toLowerCase();
+      list = list.filter((p) => p.name.toLowerCase().includes(q));
+    }
+    if (playersView.positions.size) {
+      list = list.filter((p) => playersView.positions.has(p.position));
+    }
+    if (playersView.availability === "free") list = list.filter((p) => !p.fantasy_team);
+    if (playersView.availability === "rostered") list = list.filter((p) => p.fantasy_team);
+    if (playersView.injuredOnly) list = list.filter((p) => p.injury_status);
+
+    const { sortKey, sortDir } = playersView;
+    list.sort((a, b) => {
+      let av = a[sortKey];
+      let bv = b[sortKey];
+      if (av === null || av === undefined) av = -Infinity;
+      if (bv === null || bv === undefined) bv = -Infinity;
+      if (typeof av === "string") return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      return sortDir === "asc" ? av - bv : bv - av;
+    });
+
+    const total = list.length;
+    list = list.slice(0, 200);
+
+    const headRow = el(
+      "tr",
+      {},
+      PLAYERS_COLUMNS.map((col) =>
+        el(
+          "th",
+          {
+            class: col.sortable && playersView.sortKey === col.key ? "sorted" : "",
+            onclick: col.sortable
+              ? () => {
+                  if (playersView.sortKey === col.key) {
+                    playersView.sortDir = playersView.sortDir === "asc" ? "desc" : "asc";
+                  } else {
+                    playersView.sortKey = col.key;
+                    playersView.sortDir = "desc";
+                  }
+                  render();
+                }
+              : null,
+          },
+          col.label + (col.sortable && playersView.sortKey === col.key ? (playersView.sortDir === "asc" ? " ▲" : " ▼") : "")
+        )
+      )
+    );
+
+    const rows = list.map((p) => {
+      const st = statusInfo(p);
+      return el("tr", {}, [
+        el("td", {}, [posChip(p.position), " ", playerLink(p.id)]),
+        el("td", {}, p.position),
+        el("td", {}, p.team || "–"),
+        el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), " ", p.fantasy_team ? p.fantasy_team.team_name : "Frei"]),
+        el("td", {}, fmt1(p.season_total)),
+        el("td", {}, fmt1(p.season_avg)),
+        el("td", {}, fmt1(p.targets_pg)),
+        el("td", {}, p.snap_pct ? `${p.snap_pct}%` : "–"),
+        el("td", {}, fmt1(p.touches_pg)),
+        el("td", {}, fmt1(p.redzone_pg)),
+        el("td", {}, fmt1(p.projection_week)),
+        el("td", {}, p.trade_value ? fmtInt(p.trade_value) : "–"),
+      ]);
+    });
+
+    const wrap = el("div", { class: "card table-wrap" }, [
+      el("div", { style: "font-size:12px;color:var(--text-muted);margin-bottom:8px;" }, `${total} Spieler gefunden${total > 200 ? " (zeige erste 200)" : ""}`),
+      rows.length
+        ? el("table", { class: "data-table" }, [el("thead", {}, headRow), el("tbody", {}, rows)])
+        : el("div", { class: "empty-state" }, "Keine Spieler gefunden."),
+    ]);
+    return wrap;
+  }
+
+  // ---------- Waiver Wire ----------
+  const POS_LABELS_DE = { QB: "Quarterback", RB: "Running Back", WR: "Wide Receiver", TE: "Tight End", K: "Kicker", DEF: "Defense" };
+
+  function renderWaiver() {
+    const frag = el("div", {});
+    frag.appendChild(renderHeader());
+
+    const weakness = DATA.waiver.position_weakness || {};
+    const weaknessCard = el("div", { class: "card" }, [
+      el("div", { class: "card-title" }, "Deine Roster-Schwächen"),
+      el(
+        "div",
+        { style: "display:flex;gap:16px;flex-wrap:wrap;" },
+        POSITIONS.map((pos) => {
+          const w = weakness[pos] || 0;
+          const level = w > 3 ? "status-bad" : w > 1 ? "status-warn" : "status-good";
+          return el("div", { style: "text-align:center;" }, [
+            posChip(pos),
+            el("div", { style: "font-size:17px;font-weight:800;margin-top:4px;" }, [el("span", { class: `status-dot ${level}` }), " ", w.toFixed(1)]),
+          ]);
+        })
+      ),
+      el("div", { class: "empty-state", style: "padding-top:10px;" }, "Höherer Wert = stärkerer Bedarf relativ zum Liga-Durchschnitt."),
+    ]);
+    frag.appendChild(weaknessCard);
+
+    POSITIONS.forEach((pos) => {
+      const entries = (DATA.waiver.by_position && DATA.waiver.by_position[pos]) || [];
+      if (!entries.length) return;
+      frag.appendChild(el("div", { class: "section-label" }, POS_LABELS_DE[pos] || pos));
+      frag.appendChild(
+        el(
+          "div",
+          { class: "card mini-list" },
+          entries.map((e) => {
+            const p = DATA.players[e.player_id];
+            const drop = e.drop_candidate_id ? DATA.players[e.drop_candidate_id] : null;
+            return el("div", { class: "mini-item", style: "display:block;" }, [
+              el("div", { style: "display:flex;justify-content:space-between;align-items:center;" }, [
+                el("div", {}, [posChip(p.position), " ", playerLink(p.id), ` (${p.team || "FA"})`]),
+                el("div", { style: "font-size:12px;color:var(--text-muted);" }, `Ø ${fmt1(p.season_avg)} · Proj. ${fmt1(p.projection_week)}`),
+              ]),
+              el("div", { class: "reason" }, e.reasons.join(" · ")),
+              el(
+                "div",
+                { class: "reason", style: "margin-top:2px;" },
+                drop ? ["Drop-Kandidat: ", playerLink(drop.id)] : "Kein klarer Drop-Kandidat auf deiner Bank."
+              ),
+            ]);
+          })
+        )
+      );
+    });
+
+    return frag;
+  }
+
   // ---------- Player detail panel ----------
   function openPlayerDetail(pid) {
     const p = DATA.players[pid];
@@ -425,6 +701,20 @@
       statTile("Trending", p.trending_add ? `+${fmtInt(p.trending_add)}` : p.trending_drop ? `-${fmtInt(p.trending_drop)}` : "–"),
     ]);
     panel.appendChild(statGrid);
+
+    if (["QB", "RB", "WR", "TE"].includes(p.position)) {
+      panel.appendChild(el("div", { class: "section-label" }, "Usage (Ø pro Spiel)"));
+      panel.appendChild(
+        el("div", { class: "grid grid-3" }, [
+          statTile("Targets", fmt1(p.targets_pg)),
+          statTile("Snap %", p.snap_pct ? `${p.snap_pct}%` : "–"),
+          statTile("Touches", fmt1(p.touches_pg)),
+          statTile("Red-Zone", fmt1(p.redzone_pg)),
+          statTile("Air Yards", p.air_yards ? fmtInt(p.air_yards / Math.max(1, p.games_played)) : "–"),
+          statTile("Spiele", p.games_played ?? "–"),
+        ])
+      );
+    }
 
     panel.appendChild(el("div", { class: "section-label" }, "Fantasy-Punkte pro Woche"));
     panel.appendChild(chart);
