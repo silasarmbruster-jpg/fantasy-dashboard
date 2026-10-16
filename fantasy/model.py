@@ -4,7 +4,8 @@ data.json-Modell, das das Frontend konsumiert."""
 import math
 from datetime import datetime, timezone
 
-from . import config, waiver, startsit, tradefinder, planner, league_feed
+from . import config, waiver, startsit, tradefinder, planner, league_feed, sellhigh
+from . import roster_strength
 from .scoring import score as score_stats
 
 MATCHUP_POSITIONS = ("QB", "RB", "WR", "TE", "K")
@@ -197,6 +198,7 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
         "injury_body_part": pinfo.get("injury_body_part"),
         "injury_notes": pinfo.get("injury_notes"),
         "bye_week": bye_weeks.get(team) if team else None,
+        "depth_chart_order": pinfo.get("depth_chart_order"),
         "photo": photo,
         "weekly_points": weekly_points,
         "season_total": season_total,
@@ -408,7 +410,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         },
         "players": players,
     }
-    data["waiver"] = waiver.compute(data)
+    data["waiver"] = waiver.compute(data, league_raw=league, my_roster_raw=my_roster_obj, raw_transactions=transactions or [])
     data["start_sit"] = startsit.compute(data)
     data["trade_finder"] = tradefinder.compute(data)
     data["planner"] = planner.compute(data, future_matchups_by_week or {})
@@ -416,4 +418,6 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         "power_ranking": league_feed.power_ranking(teams),
         "transactions": league_feed.normalize_transactions(transactions or [], roster_by_id),
     }
+    data["sell_buy"] = sellhigh.compute(data)
+    data["position_strength"] = roster_strength.position_rank_matrix(teams, players)
     return data

@@ -29,6 +29,21 @@ def team_strengths(teams, players):
     return strengths_by_pos
 
 
+def position_rank_matrix(teams, players):
+    """pos -> Liste von {roster_id, team_name, value, rank}, nach Stärke
+    sortiert (Rang 1 = stärkstes Team der Liga an dieser Position)."""
+    strengths_by_pos = team_strengths(teams, players)
+    team_names = {t["roster_id"]: t["team_name"] for t in teams}
+    out = {}
+    for pos, by_team in strengths_by_pos.items():
+        ranked = sorted(by_team.items(), key=lambda kv: kv[1], reverse=True)
+        out[pos] = [
+            {"roster_id": rid, "team_name": team_names.get(rid, f"Team {rid}"), "value": round(val, 2), "rank": i + 1}
+            for i, (rid, val) in enumerate(ranked)
+        ]
+    return out
+
+
 def weakness_matrix(teams, players):
     """roster_id -> {pos: Schwäche (>0 = unterdurchschnittlich)}."""
     strengths_by_pos = team_strengths(teams, players)

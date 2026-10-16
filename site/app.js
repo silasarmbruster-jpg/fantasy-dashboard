@@ -63,6 +63,43 @@
     return "Frei (Waiver/FA)";
   }
 
+  function initialsOf(name) {
+    return (name || "?").split(" ").map((w) => w[0]).filter(Boolean).slice(0, 2).join("").toUpperCase() || "?";
+  }
+  function avatarFallback(p, size) {
+    return el("div", { class: `avatar-fallback pos-${(p && p.position) || ""}` }, p ? initialsOf(p.name) : "?");
+  }
+  // size: "sm" (Listen/Tabellen), "md" (Karten), "lg" (Detailansicht)
+  function playerAvatar(p, size = "sm") {
+    const wrap = el("div", { class: `avatar avatar-${size}` });
+    if (p && p.photo) {
+      const img = el("img", { class: "avatar-img", src: p.photo, alt: "", loading: "lazy" });
+      img.addEventListener(
+        "error",
+        () => {
+          wrap.innerHTML = "";
+          wrap.appendChild(avatarFallback(p));
+        },
+        { once: true }
+      );
+      wrap.appendChild(img);
+    } else {
+      wrap.appendChild(avatarFallback(p));
+    }
+    return wrap;
+  }
+  // Kompakte Zeile: Avatar + Positions-Chip + klickbarer Name (für Tabellen/Listen)
+  function playerTag(pid, extra) {
+    const p = DATA.players[pid];
+    if (!p) return el("span", { style: "color:var(--text-faint);" }, pid);
+    return el("span", { class: "player-row", style: "display:inline-flex;gap:8px;" }, [
+      playerAvatar(p, "sm"),
+      posChip(p.position),
+      playerLink(pid),
+      extra ? el("span", { style: "color:var(--text-muted);font-size:11.5px;" }, extra) : null,
+    ].filter(Boolean));
+  }
+
   // ---------- Router ----------
   function currentTabId() {
     const hash = (location.hash || "#overview").replace("#", "");
@@ -123,10 +160,32 @@
   }
 
   // ---------- Header (shared) ----------
-  function renderHeader() {
+  function renderHeader(opts) {
     const me = DATA.me;
     const league = DATA.league;
     const genDate = new Date(DATA.generated_at);
+    const stats = [
+      el("div", { class: "header-stat" }, [
+        el("div", { class: "value" }, `${me.wins}-${me.losses}${me.ties ? `-${me.ties}` : ""}`),
+        el("div", { class: "label" }, "Bilanz"),
+      ]),
+      el("div", { class: "header-stat" }, [
+        el("div", { class: "value" }, `#${me.rank}`),
+        el("div", { class: "label" }, `von ${league.total_rosters}`),
+      ]),
+      el("div", { class: "header-stat" }, [
+        el("div", { class: "value" }, fmt1(me.fpts)),
+        el("div", { class: "label" }, "Punkte"),
+      ]),
+    ];
+    if (opts && opts.showPlayoffNote) {
+      stats.push(
+        el("div", { class: "header-stat" }, [
+          el("div", { class: "value", style: "font-size:15px;color:var(--text-faint);" }, "—"),
+          el("div", { class: "label" }, "Playoff-Chance (ab Phase 4)"),
+        ])
+      );
+    }
     return el("div", { class: "page-header" }, [
       el("div", {}, [
         el("h1", {}, me.team_name),
@@ -139,40 +198,54 @@
           })}`
         ),
       ]),
-      el("div", { class: "header-stats" }, [
-        el("div", { class: "header-stat" }, [
-          el("div", { class: "value" }, `${me.wins}-${me.losses}${me.ties ? `-${me.ties}` : ""}`),
-          el("div", { class: "label" }, "Bilanz"),
-        ]),
-        el("div", { class: "header-stat" }, [
-          el("div", { class: "value" }, `#${me.rank}`),
-          el("div", { class: "label" }, `von ${league.total_rosters}`),
-        ]),
-        el("div", { class: "header-stat" }, [
-          el("div", { class: "value" }, fmt1(me.fpts)),
-          el("div", { class: "label" }, "Punkte"),
-        ]),
-      ]),
+      el("div", { class: "header-stats" }, stats),
     ]);
   }
 
   // ---------- Übersicht ----------
   function renderOverview() {
     const frag = el("div", {});
-    frag.appendChild(renderHeader());
+    frag.appendChild(renderHeader({ showPlayoffNote: true }));
     frag.appendChild(renderMatchupCard());
 
     const grid = el("div", { class: "grid grid-2" });
     grid.appendChild(renderInjuryAlertsCard());
     grid.appendChild(renderTrendingCard());
-    grid.appendChild(renderWaiverTipsCard());
     grid.appendChild(renderStartSitTipsCard());
+    grid.appendChild(renderWaiverCategoryCard());
     frag.appendChild(grid);
 
     const grid2 = el("div", { class: "grid grid-2" });
     grid2.appendChild(renderTradeTipsCard());
+    grid2.appendChild(renderSellBuyCard());
     frag.appendChild(grid2);
+
+    frag.appendChild(renderPositionStrengthCard());
+    frag.appendChild(renderOutlookCard());
     return frag;
+  }
+
+  function matchupShortAnalysis(m) {
+    const sum = (starters) => {
+      const byPos = {};
+      starters.forEach((s) => {
+        const p = DATA.players[s.player_id];
+        if (!p) return;
+        byPos[p.position] = (byPos[p.position] || 0) + (s.actual_points || p.projection_week || 0);
+      });
+      return byPos;
+    };
+    const mine = sum(m.me.starters);
+    const theirs = sum(m.opponent.starters);
+    const diffs = POSITIONS.map((pos) => ({ pos, d: (mine[pos] || 0) - (theirs[pos] || 0) })).filter((x) => Math.abs(x.d) > 0.5);
+    diffs.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+    const myEdges = diffs.filter((x) => x.d > 0).slice(0, 2);
+    const oppEdges = diffs.filter((x) => x.d < 0).slice(0, 2);
+    if (!myEdges.length && !oppEdges.length) return null;
+    const parts = [];
+    if (myEdges.length) parts.push(`Du bist stärker bei ${myEdges.map((e) => `${e.pos} (+${e.d.toFixed(1)})`).join(", ")}.`);
+    if (oppEdges.length) parts.push(`Der Gegner ist stärker bei ${oppEdges.map((e) => `${e.pos} (${e.d.toFixed(1)})`).join(", ")}.`);
+    return parts.join(" ");
   }
 
   function renderMatchupCard() {
@@ -212,6 +285,11 @@
       );
     }
 
+    const shortAnalysis = matchupShortAnalysis(m);
+    if (shortAnalysis) {
+      card.appendChild(el("div", { style: "font-size:12.5px;color:var(--text-muted);margin:8px 0 2px;padding:10px 12px;background:var(--accent-soft);border-radius:8px;" }, shortAnalysis));
+    }
+
     card.appendChild(renderLineupTable("Mein Lineup", m.me.starters));
     card.appendChild(renderLineupTable(m.opponent.team_name, m.opponent.starters));
     return card;
@@ -224,7 +302,7 @@
       const st = statusInfo(p);
       return el("tr", {}, [
         el("td", {}, el("span", { class: "slot-tag" }, s.slot)),
-        el("td", {}, [posChip(p.position), " ", playerLink(s.player_id)]),
+        el("td", {}, playerTag(s.player_id)),
         el("td", {}, [el("span", { class: `status-dot ${st.cls}`, title: st.label })]),
         el("td", {}, fmt1(s.actual_points ?? p.projection_week)),
       ]);
@@ -243,6 +321,8 @@
     const injured = [...myIds]
       .map((id) => DATA.players[id])
       .filter((p) => p && p.injury_status);
+    const replacementsByPid = {};
+    (DATA.waiver.injury_replacements || []).forEach((r) => (replacementsByPid[r.player_id] = r));
 
     const body = injured.length
       ? el(
@@ -250,10 +330,16 @@
           { class: "mini-list" },
           injured.map((p) => {
             const st = statusInfo(p);
-            return el("div", { class: "mini-item" }, [
-              el("div", {}, [posChip(p.position), " ", playerLink(p.id)]),
-              el("span", { class: `status-dot ${st.cls}` , title: st.label}),
-            ]);
+            const rep = replacementsByPid[p.id];
+            return el("div", { class: "mini-item", style: "display:block;" }, [
+              el("div", { style: "display:flex;justify-content:space-between;align-items:center;" }, [
+                playerTag(p.id),
+                el("span", { class: `status-dot ${st.cls}`, title: st.label }),
+              ]),
+              rep && rep.replacement_id
+                ? el("div", { class: "reason" }, [`Ersatz (${rep.source === "bench" ? "Bank" : "Waiver"}): `, playerLink(rep.replacement_id)])
+                : null,
+            ].filter(Boolean));
           })
         )
       : el("div", { class: "empty-state" }, "Keine Verletzungs-Alarme in deinem Kader.");
@@ -272,7 +358,7 @@
           { class: "mini-list" },
           list.map((p) =>
             el("div", { class: "mini-item" }, [
-              el("div", {}, [posChip(p.position), " ", playerLink(p.id), ` (${teamAvailability(p)})`]),
+              playerTag(p.id, `(${teamAvailability(p)})`),
               el("span", { class: "reason" }, `+${fmtInt(p.trending_add)}`),
             ])
           )
@@ -287,26 +373,147 @@
     ]);
   }
 
-  function renderWaiverTipsCard() {
-    const top = (DATA.waiver.top_overall || []).slice(0, 3);
-    const body = top.length
-      ? el(
-          "div",
-          { class: "mini-list" },
-          top.map((e) => {
-            const p = DATA.players[e.player_id];
-            return el("div", { class: "mini-item", style: "display:block;" }, [
-              el("div", { style: "display:flex;justify-content:space-between;" }, [
-                el("div", {}, [posChip(p.position), " ", playerLink(e.player_id)]),
-              ]),
-              el("div", { class: "reason" }, e.reasons[0]),
-            ]);
-          })
-        )
-      : el("div", { class: "empty-state" }, "Keine Waiver-Empfehlungen verfügbar.");
+  const WAIVER_CATEGORY_LABELS = {
+    overall: "Beste Gesamt",
+    lineup_upgrade: "Lineup-Upgrade",
+    trending: "Trending",
+    handcuffs: "Handcuffs",
+    breakouts: "Breakouts",
+    streaming: "Streaming",
+  };
+  let overviewWaiverCategory = "overall";
+
+  function buildWaiverCategoryBody(key) {
+    let items = [];
+    if (key === "overall") {
+      items = (DATA.waiver.top_overall || []).slice(0, 3).map((e) => ({ id: e.player_id, note: e.reasons[0] }));
+    } else if (key === "lineup_upgrade") {
+      items = (DATA.waiver.lineup_upgrades || []).slice(0, 3).map((e) => {
+        const rep = DATA.players[e.replaces_player_id];
+        return { id: e.player_id, note: `ersetzt ${rep ? rep.name : "?"} · +${e.delta} Pkt. diese Woche` };
+      });
+    } else if (key === "trending") {
+      items = (DATA.waiver.trending || []).slice(0, 3).map((id) => {
+        const p = DATA.players[id];
+        return { id, note: `+${fmtInt(p.trending_add)} Adds (24h)` };
+      });
+    } else if (key === "handcuffs") {
+      items = (DATA.waiver.handcuffs || []).slice(0, 3).map((e) => {
+        const starter = DATA.players[e.handcuff_for_player_id];
+        return { id: e.player_id, note: `Handcuff für ${starter ? starter.name : "?"}${e.is_mine ? " (dein Spieler)" : ""}` };
+      });
+    } else if (key === "breakouts") {
+      items = (DATA.waiver.breakouts || []).slice(0, 3).map((id) => ({ id, note: "Junger Spieler mit steigender Nutzung" }));
+    } else if (key === "streaming") {
+      items = Object.entries(DATA.waiver.streaming || {}).map(([pos, e]) => ({
+        id: e.player_id,
+        note: `${pos}-Streamer diese Woche${e.opponent ? ` · vs ${e.opponent}` : ""}`,
+      }));
+    }
+    if (!items.length) return el("div", { class: "empty-state" }, "Keine Daten für diese Kategorie.");
+    return el(
+      "div",
+      { class: "mini-list" },
+      items.map((it) => el("div", { class: "mini-item", style: "display:block;" }, [playerTag(it.id), el("div", { class: "reason" }, it.note)]))
+    );
+  }
+
+  function renderWaiverCategoryCard() {
+    const card = el("div", { class: "card" }, [
+      el("div", { class: "card-title" }, ["Top Waiver-Picks", el("button", { class: "see-all", onclick: () => navigateTo("waiver") }, "Alle ansehen")]),
+    ]);
+    const tabRow = el("div", { class: "tab-row" });
+    const bodyHost = el("div", {});
+
+    function refreshTabs() {
+      tabRow.innerHTML = "";
+      Object.entries(WAIVER_CATEGORY_LABELS).forEach(([key, label]) => {
+        tabRow.appendChild(
+          el(
+            "button",
+            {
+              class: `tab-pill ${overviewWaiverCategory === key ? "active" : ""}`,
+              onclick: () => {
+                overviewWaiverCategory = key;
+                refreshTabs();
+                refreshBody();
+              },
+            },
+            label
+          )
+        );
+      });
+    }
+    function refreshBody() {
+      bodyHost.innerHTML = "";
+      bodyHost.appendChild(buildWaiverCategoryBody(overviewWaiverCategory));
+    }
+    refreshTabs();
+    refreshBody();
+    card.appendChild(tabRow);
+    card.appendChild(bodyHost);
+    return card;
+  }
+
+  function renderSellBuyCard() {
+    const sh = (DATA.sell_buy.sell_high || []).slice(0, 3);
+    const bl = (DATA.sell_buy.buy_low || []).slice(0, 3);
     return el("div", { class: "card" }, [
-      el("div", { class: "card-title" }, ["Top Waiver-Tipps", el("button", { class: "see-all", onclick: () => navigateTo("waiver") }, "Alle ansehen")]),
-      body,
+      el("div", { class: "card-title" }, "Sell High / Buy Low"),
+      el("div", { class: "grid grid-2" }, [
+        el("div", {}, [
+          el("div", { style: "font-weight:700;font-size:11px;color:var(--status-bad);margin-bottom:8px;letter-spacing:0.03em;" }, "SELL HIGH"),
+          sh.length
+            ? el("div", { class: "mini-list" }, sh.map((e) => el("div", { class: "mini-item" }, [playerTag(e.player_id), el("span", { class: "reason" }, `${e.ppo_ratio}×`)])))
+            : el("div", { class: "empty-state" }, "–"),
+        ]),
+        el("div", {}, [
+          el("div", { style: "font-weight:700;font-size:11px;color:var(--status-good);margin-bottom:8px;letter-spacing:0.03em;" }, "BUY LOW"),
+          bl.length
+            ? el("div", { class: "mini-list" }, bl.map((e) => el("div", { class: "mini-item" }, [playerTag(e.player_id), el("span", { class: "reason" }, `${e.opp_ratio}× Usage`)])))
+            : el("div", { class: "empty-state" }, "–"),
+        ]),
+      ]),
+    ]);
+  }
+
+  function renderPositionStrengthCard() {
+    const ps = DATA.position_strength;
+    const myRosterId = DATA.me.roster_id;
+    const rows = POSITIONS.map((pos) => {
+      const list = ps[pos] || [];
+      const mine = list.find((e) => e.roster_id === myRosterId);
+      if (!mine) return null;
+      const maxVal = Math.max(...list.map((e) => e.value), 0.01);
+      const pct = Math.max(4, (mine.value / maxVal) * 100);
+      const barColor = mine.rank <= 4 ? "var(--status-good)" : mine.rank <= 10 ? "var(--status-warn)" : "var(--status-bad)";
+      return el("div", { style: "display:flex;align-items:center;gap:12px;margin-bottom:10px;" }, [
+        posChip(pos),
+        el("div", { style: "flex:1;background:var(--accent-soft);border-radius:6px;height:10px;overflow:hidden;" }, [
+          el("div", { style: `width:${pct}%;height:100%;background:${barColor};border-radius:6px;` }),
+        ]),
+        el("div", { style: "font-size:12.5px;font-weight:700;width:50px;text-align:right;" }, `#${mine.rank}/${list.length}`),
+      ]);
+    }).filter(Boolean);
+    return el("div", { class: "card" }, [el("div", { class: "card-title" }, "Positionsstärke im Liga-Vergleich"), ...rows]);
+  }
+
+  function renderOutlookCard() {
+    const rest = (DATA.planner.remaining_schedule || []).slice(0, 4);
+    const powerByRoster = {};
+    (DATA.league_feed.power_ranking || []).forEach((e) => (powerByRoster[e.roster_id] = e));
+    const rows = rest.map((g) => {
+      const pr = g.opponent_roster_id != null ? powerByRoster[g.opponent_roster_id] : null;
+      const cls = pr ? (pr.power_rank <= 5 ? "status-bad" : pr.power_rank >= 10 ? "status-good" : "status-warn") : "";
+      const label = pr ? (pr.power_rank <= 5 ? "Schwer" : pr.power_rank >= 10 ? "Leicht" : "Mittel") : "–";
+      return el("div", { style: "display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-top:1px solid var(--card-border);" }, [
+        el("div", {}, [el("span", { style: "font-weight:700;" }, `W${g.week}`), ` · ${g.opponent_team_name || "–"}`]),
+        el("div", { style: "display:flex;align-items:center;gap:6px;" }, [cls ? el("span", { class: `status-dot ${cls}` }) : null, el("span", { style: "font-size:12px;color:var(--text-muted);" }, label)].filter(Boolean)),
+      ]);
+    });
+    return el("div", { class: "card" }, [
+      el("div", { class: "card-title" }, ["Ausblick", el("button", { class: "see-all", onclick: () => navigateTo("planner") }, "Alle ansehen")]),
+      rows.length ? el("div", {}, rows) : el("div", { class: "empty-state" }, "Kein Restprogramm verfügbar."),
     ]);
   }
 
@@ -385,7 +592,7 @@
       if (!p) return null;
       const st = statusInfo(p);
       return el("tr", {}, [
-        el("td", {}, [slots ? el("span", { class: "slot-tag" }, slotByPid[pid]) : null, " ", playerLink(pid)].filter(Boolean)),
+        el("td", {}, [slots ? el("span", { class: "slot-tag" }, slotByPid[pid]) : null, playerTag(pid)].filter(Boolean)),
         el("td", {}, posChip(p.position)),
         el("td", {}, p.team || "–"),
         el("td", {}, p.bye_week ? `W${p.bye_week}` : "–"),
@@ -593,7 +800,7 @@
     const rows = list.map((p) => {
       const st = statusInfo(p);
       return el("tr", {}, [
-        el("td", {}, [posChip(p.position), " ", playerLink(p.id)]),
+        el("td", {}, playerTag(p.id)),
         el("td", {}, p.position),
         el("td", {}, p.team || "–"),
         el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), " ", p.fantasy_team ? p.fantasy_team.team_name : "Frei"]),
@@ -754,7 +961,7 @@
                   onChange();
                 },
               },
-              [posChip(p.position), ` ${p.name} `, el("span", { style: "color:var(--text-muted);font-size:11px;" }, p.fantasy_team ? `(${p.fantasy_team.team_name})` : "Frei")]
+              [playerAvatar(p, "sm"), posChip(p.position), ` ${p.name} `, el("span", { style: "color:var(--text-muted);font-size:11px;" }, p.fantasy_team ? `(${p.fantasy_team.team_name})` : "Frei")]
             )
           )
         )
@@ -772,7 +979,7 @@
           if (!p) return;
           selectedHost.appendChild(
             el("div", { class: "mini-item" }, [
-              el("div", {}, [posChip(p.position), " ", playerLink(p.id)]),
+              playerTag(p.id),
               el("div", { style: "display:flex;align-items:center;gap:8px;" }, [
                 el("span", {}, p.trade_value ? fmtInt(p.trade_value) : "–"),
                 el(
@@ -928,9 +1135,9 @@
         card.appendChild(
           el("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-top:10px;flex-wrap:wrap;gap:10px;" }, [
             el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;" }, [
-              el("span", {}, [posChip(g.position), " ", playerLink(g.id), ` (${fmtInt(t.proposal.give_value)})`]),
+              playerTag(g.id, `(${fmtInt(t.proposal.give_value)})`),
               el("span", { style: "color:var(--text-faint);" }, "⇄"),
-              el("span", {}, [posChip(r.position), " ", playerLink(r.id), ` (${fmtInt(t.proposal.get_value)})`]),
+              playerTag(r.id, `(${fmtInt(t.proposal.get_value)})`),
             ]),
             el(
               "button",
@@ -1056,7 +1263,7 @@
       const role = starterSet.has(pid) ? "Starter" : reserveSet.has(pid) ? "Reserve" : "Bank";
       const st = statusInfo(p);
       return el("tr", {}, [
-        el("td", {}, [posChip(p.position), " ", playerLink(pid)]),
+        el("td", {}, playerTag(pid)),
         el("td", {}, p.team || "–"),
         el("td", {}, role),
         el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), " ", st.label]),
@@ -1173,7 +1380,7 @@
       const changed = (ss.decisions || []).some((d) => d.recommended_player_id === p.id);
       return el("tr", { style: changed ? "background:var(--accent-soft);" : "" }, [
         el("td", {}, el("span", { class: "slot-tag" }, s.slot)),
-        el("td", {}, [posChip(p.position), " ", playerLink(p.id), changed ? el("span", { style: "color:var(--accent);font-size:11px;margin-left:6px;", title: "Wechsel empfohlen" }, "NEU") : null].filter(Boolean)),
+        el("td", {}, [playerTag(p.id), changed ? el("span", { style: "color:var(--accent);font-size:11px;margin-left:6px;", title: "Wechsel empfohlen" }, "NEU") : null].filter(Boolean)),
         el("td", {}, [el("span", { class: `status-dot ${st.cls}` }), ` ${p.team || "FA"} · ${p.matchup_opponent ? "vs " + p.matchup_opponent : ""}`]),
         el("td", {}, fmt1(s.effective_projection)),
       ]);
@@ -1199,9 +1406,9 @@
           el("div", { class: "card" }, [
             el("div", { style: "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;" }, [
               el("div", { style: "display:flex;align-items:center;gap:10px;font-size:15px;font-weight:700;" }, [
-                cur ? el("span", {}, [posChip(cur.position), " ", playerLink(cur.id)]) : el("span", { style: "color:var(--text-faint);" }, "Bank"),
+                cur ? playerTag(cur.id) : el("span", { style: "color:var(--text-faint);" }, "Bank"),
                 el("span", { style: "color:var(--text-faint);" }, "→"),
-                el("span", {}, [posChip(rec.position), " ", playerLink(rec.id)]),
+                playerTag(rec.id),
               ]),
               el("div", { style: `font-weight:800;color:${d.delta >= 0 ? "var(--status-good)" : "var(--status-bad)"};` }, `${d.delta >= 0 ? "+" : ""}${d.delta} Pkt.`),
             ]),
@@ -1220,57 +1427,246 @@
 
   // ---------- Waiver Wire ----------
   const POS_LABELS_DE = { QB: "Quarterback", RB: "Running Back", WR: "Wide Receiver", TE: "Tight End", K: "Kicker", DEF: "Defense" };
+  const WAIVER_TABS = {
+    position: "Nach Position",
+    lineup_upgrade: "Lineup-Upgrade",
+    trending: "Trending",
+    handcuffs: "Handcuffs",
+    breakouts: "Breakouts",
+    streaming: "Streaming",
+  };
+  const waiverView = { tab: "position", posFilter: null, sortKey: "score" };
+
+  function renderWaiverSystemBanner() {
+    const ws = DATA.waiver.waiver_system || {};
+    let text;
+    if (ws.type === "faab") {
+      text = `FAAB-Liga: Restbudget ${ws.budget_remaining ?? "?"} von ${ws.budget_total ?? "?"}. Gebotsvorschläge stehen bei den Spielern unten.`;
+    } else if (ws.type === "priority") {
+      text = `Prioritäts-Waiver (keine FAAB-Gebote): deine aktuelle Position ist #${ws.priority ?? "?"} von ${ws.total_teams ?? "?"}. Je kleiner die Zahl, desto eher bekommst du den Zuschlag.`;
+    } else {
+      text = "Waiver-System der Liga konnte nicht eindeutig ermittelt werden (keine Transaktionshistorie verfügbar).";
+    }
+    return el("div", { class: "card", style: "font-size:12.5px;color:var(--text-muted);display:flex;align-items:center;gap:8px;" }, [
+      el("span", { style: "font-size:16px;" }, "🏷️"),
+      text,
+    ]);
+  }
+
+  function buildWaiverPlayerCard(entry) {
+    const p = DATA.players[entry.player_id];
+    if (!p) return null;
+    const st = statusInfo(p);
+    const drop = entry.drop_candidate_id ? DATA.players[entry.drop_candidate_id] : null;
+    const usage = p.position === "RB" ? `${fmt1(p.touches_pg)} Touches/Sp.` : ["WR", "TE"].includes(p.position) ? `${fmt1(p.targets_pg)} Targets/Sp.` : null;
+
+    const card = el("div", { class: "player-card", style: "flex-wrap:wrap;align-items:flex-start;cursor:default;" }, [
+      el("div", { style: "display:flex;gap:12px;align-items:center;cursor:pointer;", onclick: () => openPlayerDetail(p.id) }, [
+        playerAvatar(p, "md"),
+        el("div", {}, [
+          el("div", { class: "pc-name" }, [p.name, el("span", { class: `status-dot ${st.cls}`, style: "margin-left:6px;", title: st.label })]),
+          el("div", { class: "pc-meta" }, [posChip(p.position), ` ${p.team || "FA"} · ${teamAvailability(p)}`]),
+        ]),
+      ]),
+      el("div", { class: "pc-stats" }, [
+        el("div", { class: "pc-value" }, fmt1(p.projection_week)),
+        el("div", { class: "pc-label" }, "Proj."),
+      ]),
+    ]);
+
+    const metaRow = el("div", { style: "width:100%;display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--text-muted);" }, [
+      p.trending_add ? el("span", {}, `📈 +${fmtInt(p.trending_add)} Adds`) : null,
+      usage ? el("span", {}, usage) : null,
+      entry.high_competition ? el("span", { style: "color:var(--status-warn);font-weight:700;" }, "⚠️ Hohe Konkurrenz") : null,
+    ].filter(Boolean));
+    if (metaRow.children.length) card.appendChild(metaRow);
+
+    card.appendChild(el("div", { style: "width:100%;margin-top:6px;font-size:12px;color:var(--text-muted);" }, entry.reasons.join(" · ")));
+    card.appendChild(
+      el("div", { style: "width:100%;margin-top:4px;font-size:12px;color:var(--text-muted);" },
+        drop ? ["Drop-Kandidat: ", playerLink(drop.id)] : "Kein klarer Drop-Kandidat auf deiner Bank."
+      )
+    );
+    if (entry.faab_bid) {
+      card.appendChild(
+        el("div", { style: "width:100%;margin-top:6px;font-size:12.5px;font-weight:700;color:var(--accent);" },
+          `Gebotsvorschlag: ${entry.faab_bid.amount} (${entry.faab_bid.pct_of_budget}% des Restbudgets)`
+        )
+      );
+    }
+    return card;
+  }
+
+  function buildWaiverPositionView(host) {
+    host.innerHTML = "";
+
+    const filterBar = el("div", { style: "display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;" });
+    const posWrap = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;" });
+    [null, ...POSITIONS].forEach((pos) => {
+      posWrap.appendChild(
+        el(
+          "button",
+          {
+            class: "tab-pill" + (waiverView.posFilter === pos ? " active" : ""),
+            onclick: () => {
+              waiverView.posFilter = pos;
+              buildWaiverPositionView(host);
+            },
+          },
+          pos || "Alle"
+        )
+      );
+    });
+    filterBar.appendChild(posWrap);
+    const sortSelect = el(
+      "select",
+      {
+        style: "padding:7px 10px;border-radius:8px;border:1px solid var(--card-border);background:var(--bg);color:var(--text);font-size:12.5px;",
+        onchange: (e) => {
+          waiverView.sortKey = e.target.value;
+          buildWaiverPositionView(host);
+        },
+      },
+      [
+        el("option", { value: "score", selected: waiverView.sortKey === "score" ? "selected" : null }, "Sortierung: Nutzen"),
+        el("option", { value: "trending", selected: waiverView.sortKey === "trending" ? "selected" : null }, "Sortierung: Trending"),
+        el("option", { value: "projection", selected: waiverView.sortKey === "projection" ? "selected" : null }, "Sortierung: Projection"),
+      ]
+    );
+    filterBar.appendChild(sortSelect);
+    host.appendChild(filterBar);
+
+    const posList = waiverView.posFilter ? [waiverView.posFilter] : POSITIONS;
+    let anyEntries = false;
+    posList.forEach((pos) => {
+      let entries = ((DATA.waiver.by_position && DATA.waiver.by_position[pos]) || []).slice();
+      if (!entries.length) return;
+      anyEntries = true;
+      if (waiverView.sortKey === "trending") {
+        entries.sort((a, b) => (DATA.players[b.player_id].trending_add || 0) - (DATA.players[a.player_id].trending_add || 0));
+      } else if (waiverView.sortKey === "projection") {
+        entries.sort((a, b) => (DATA.players[b.player_id].projection_week || 0) - (DATA.players[a.player_id].projection_week || 0));
+      }
+      host.appendChild(el("div", { class: "section-label" }, POS_LABELS_DE[pos] || pos));
+      host.appendChild(
+        el(
+          "div",
+          { style: "display:flex;flex-direction:column;gap:10px;margin-bottom:8px;" },
+          entries.map(buildWaiverPlayerCard).filter(Boolean)
+        )
+      );
+    });
+    if (!anyEntries) host.appendChild(el("div", { class: "card empty-state" }, "Keine Waiver-Spieler für diese Auswahl gefunden."));
+  }
+
+  function buildWaiverSpecialView(host, tab) {
+    host.innerHTML = "";
+    let cards = [];
+    if (tab === "lineup_upgrade") {
+      cards = (DATA.waiver.lineup_upgrades || []).map((e) => {
+        const base = buildWaiverPlayerCard({ player_id: e.player_id, reasons: [`+${e.delta} Pkt. ggü. deinem schwächsten Starter diese Woche`], drop_candidate_id: null });
+        const rep = DATA.players[e.replaces_player_id];
+        if (base && rep) base.appendChild(el("div", { style: "width:100%;margin-top:4px;font-size:12px;color:var(--text-muted);" }, ["Würde ersetzen: ", playerLink(rep.id)]));
+        return base;
+      });
+    } else if (tab === "trending") {
+      cards = (DATA.waiver.trending || []).map((id) => {
+        const p = DATA.players[id];
+        return buildWaiverPlayerCard({ player_id: id, reasons: [`+${fmtInt(p.trending_add)} Adds in den letzten 24h`], drop_candidate_id: _drop_candidate_client(p.position) });
+      });
+    } else if (tab === "handcuffs") {
+      cards = (DATA.waiver.handcuffs || []).map((e) => {
+        const starter = DATA.players[e.handcuff_for_player_id];
+        return buildWaiverPlayerCard({
+          player_id: e.player_id,
+          reasons: [`Backup hinter ${starter ? starter.name : "?"}${e.is_mine ? " (dein Starter)" : ""}`],
+          drop_candidate_id: _drop_candidate_client("RB"),
+        });
+      });
+    } else if (tab === "breakouts") {
+      cards = (DATA.waiver.breakouts || []).map((id) => {
+        const p = DATA.players[id];
+        return buildWaiverPlayerCard({ player_id: id, reasons: ["Junger Spieler (≤2 Jahre Erfahrung) mit steigender Nutzung/Trending"], drop_candidate_id: _drop_candidate_client(p.position) });
+      });
+    } else if (tab === "streaming") {
+      cards = Object.entries(DATA.waiver.streaming || {}).map(([pos, e]) => {
+        const factorNote = e.matchup_factor ? ` (Matchup-Faktor ${e.matchup_factor}×)` : "";
+        return buildWaiverPlayerCard({
+          player_id: e.player_id,
+          reasons: [`Beste${pos === "DEF" ? "" : "r"} ${pos}-Streamer diese Woche${e.opponent ? ` · Gegner ${e.opponent}` : ""}${factorNote}`],
+          drop_candidate_id: _drop_candidate_client(pos),
+        });
+      });
+    }
+    cards = cards.filter(Boolean);
+    if (!cards.length) {
+      host.appendChild(el("div", { class: "card empty-state" }, "Keine Daten für diese Kategorie verfügbar."));
+      return;
+    }
+    host.appendChild(el("div", { style: "display:flex;flex-direction:column;gap:10px;" }, cards));
+  }
+
+  function _drop_candidate_client(position) {
+    const compatible = ["RB", "WR", "TE"].includes(position) ? ["RB", "WR", "TE"] : [position];
+    const bench = DATA.my_roster.bench.map((id) => DATA.players[id]).filter((p) => p && compatible.includes(p.position));
+    if (!bench.length) return null;
+    return bench.reduce((worst, p) => (p.season_avg < worst.season_avg ? p : worst), bench[0]).id;
+  }
 
   function renderWaiver() {
     const frag = el("div", {});
     frag.appendChild(renderHeader());
+    frag.appendChild(renderWaiverSystemBanner());
 
     const weakness = DATA.waiver.position_weakness || {};
-    const weaknessCard = el("div", { class: "card" }, [
-      el("div", { class: "card-title" }, "Deine Roster-Schwächen"),
-      el(
-        "div",
-        { style: "display:flex;gap:16px;flex-wrap:wrap;" },
-        POSITIONS.map((pos) => {
-          const w = weakness[pos] || 0;
-          const level = w > 3 ? "status-bad" : w > 1 ? "status-warn" : "status-good";
-          return el("div", { style: "text-align:center;" }, [
-            posChip(pos),
-            el("div", { style: "font-size:17px;font-weight:800;margin-top:4px;" }, [el("span", { class: `status-dot ${level}` }), " ", w.toFixed(1)]),
-          ]);
-        })
-      ),
-      el("div", { class: "empty-state", style: "padding-top:10px;" }, "Höherer Wert = stärkerer Bedarf relativ zum Liga-Durchschnitt."),
-    ]);
-    frag.appendChild(weaknessCard);
-
-    POSITIONS.forEach((pos) => {
-      const entries = (DATA.waiver.by_position && DATA.waiver.by_position[pos]) || [];
-      if (!entries.length) return;
-      frag.appendChild(el("div", { class: "section-label" }, POS_LABELS_DE[pos] || pos));
-      frag.appendChild(
+    frag.appendChild(
+      el("div", { class: "card" }, [
+        el("div", { class: "card-title" }, "Deine Roster-Schwächen"),
         el(
           "div",
-          { class: "card mini-list" },
-          entries.map((e) => {
-            const p = DATA.players[e.player_id];
-            const drop = e.drop_candidate_id ? DATA.players[e.drop_candidate_id] : null;
-            return el("div", { class: "mini-item", style: "display:block;" }, [
-              el("div", { style: "display:flex;justify-content:space-between;align-items:center;" }, [
-                el("div", {}, [posChip(p.position), " ", playerLink(p.id), ` (${p.team || "FA"})`]),
-                el("div", { style: "font-size:12px;color:var(--text-muted);" }, `Ø ${fmt1(p.season_avg)} · Proj. ${fmt1(p.projection_week)}`),
-              ]),
-              el("div", { class: "reason" }, e.reasons.join(" · ")),
-              el(
-                "div",
-                { class: "reason", style: "margin-top:2px;" },
-                drop ? ["Drop-Kandidat: ", playerLink(drop.id)] : "Kein klarer Drop-Kandidat auf deiner Bank."
-              ),
+          { style: "display:flex;gap:16px;flex-wrap:wrap;" },
+          POSITIONS.map((pos) => {
+            const w = weakness[pos] || 0;
+            const level = w > 3 ? "status-bad" : w > 1 ? "status-warn" : "status-good";
+            return el("div", { style: "text-align:center;" }, [
+              posChip(pos),
+              el("div", { style: "font-size:17px;font-weight:800;margin-top:4px;" }, [el("span", { class: `status-dot ${level}` }), " ", w.toFixed(1)]),
             ]);
           })
-        )
-      );
-    });
+        ),
+        el("div", { class: "empty-state", style: "padding-top:10px;" }, "Höherer Wert = stärkerer Bedarf relativ zum Liga-Durchschnitt."),
+      ])
+    );
+
+    const tabRow = el("div", { class: "tab-row" });
+    const bodyHost = el("div", {});
+    function refreshTabs() {
+      tabRow.innerHTML = "";
+      Object.entries(WAIVER_TABS).forEach(([key, label]) => {
+        tabRow.appendChild(
+          el(
+            "button",
+            {
+              class: `tab-pill ${waiverView.tab === key ? "active" : ""}`,
+              onclick: () => {
+                waiverView.tab = key;
+                refreshTabs();
+                refreshBody();
+              },
+            },
+            label
+          )
+        );
+      });
+    }
+    function refreshBody() {
+      if (waiverView.tab === "position") buildWaiverPositionView(bodyHost);
+      else buildWaiverSpecialView(bodyHost, waiverView.tab);
+    }
+    refreshTabs();
+    frag.appendChild(tabRow);
+    frag.appendChild(bodyHost);
+    refreshBody();
 
     return frag;
   }
@@ -1309,13 +1705,15 @@
     panel.innerHTML = "";
     panel.appendChild(el("button", { class: "btn panel-close", onclick: closePlayerDetail }, "✕"));
     panel.appendChild(
-      el("div", { style: "display:flex;gap:12px;align-items:center;margin-top:10px;" }, [
-        p.photo ? el("img", { class: "player-photo", style: "width:56px;height:56px;", src: p.photo }) : null,
+      el("div", { class: "panel-head" }, [
+        playerAvatar(p, "lg"),
         el("div", {}, [
-          el("div", { style: "font-weight:800;font-size:17px;" }, p.name),
-          el("div", { class: "player-meta" }, [posChip(p.position), ` ${p.team || "FA"} · Alter ${p.age ?? "–"} · Bye ${p.bye_week ? "W" + p.bye_week : "–"}`]),
+          el("div", { class: "name" }, p.name),
+          el("div", { class: "player-meta", style: "margin-top:4px;font-size:12.5px;" }, [posChip(p.position), ` ${p.team || "FA"} · Alter ${p.age ?? "–"} · Bye ${p.bye_week ? "W" + p.bye_week : "–"}`]),
+          el("div", { style: "margin-top:6px;font-size:18px;font-weight:800;" }, p.trade_value ? fmtInt(p.trade_value) : "–"),
+          el("div", { style: "font-size:10.5px;color:var(--text-muted);text-transform:uppercase;" }, "Trade-Wert"),
         ]),
-      ].filter(Boolean))
+      ])
     );
     panel.appendChild(
       el("div", { style: "margin-top:10px;display:flex;align-items:center;gap:8px;" }, [
@@ -1368,9 +1766,9 @@
   }
 
   function statTile(label, value) {
-    return el("div", { class: "card", style: "padding:10px;text-align:center;margin-bottom:0;" }, [
-      el("div", { style: "font-size:16px;font-weight:800;" }, value),
-      el("div", { style: "font-size:10.5px;color:var(--text-muted);text-transform:uppercase;" }, label),
+    return el("div", { class: "card", style: "padding:12px 10px;text-align:center;margin-bottom:0;" }, [
+      el("div", { style: "font-size:19px;font-weight:800;letter-spacing:-0.01em;" }, value),
+      el("div", { style: "font-size:10.5px;color:var(--text-muted);text-transform:uppercase;margin-top:2px;" }, label),
     ]);
   }
 
