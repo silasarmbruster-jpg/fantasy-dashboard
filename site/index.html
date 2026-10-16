@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fantasy Dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app-shell">
+  <nav class="sidebar" id="sidebar">
+    <div class="sidebar-brand"><span class="dot"></span> Fantasy HQ</div>
+    <div id="nav-items"></div>
+    <div class="sidebar-footer">
+      <button class="theme-toggle" id="theme-toggle">🌓 Theme</button>
+    </div>
+  </nav>
+
+  <main class="main" id="main">
+    <div id="view-root"></div>
+  </main>
+
+  <nav class="mobile-tabbar" id="mobile-tabbar"></nav>
+</div>
+
+<div class="panel-backdrop" id="panel-backdrop"></div>
+<aside class="detail-panel" id="detail-panel"></aside>
+
+<script src="app.js"></script>
+</body>
+</html>
