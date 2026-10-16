@@ -114,6 +114,40 @@ def _handcuffs(players, my_roster_id):
     return out[:10]
 
 
+STASH_WATCH_STATUSES = {"IR", "PUP"}
+
+
+def _ir_stashes(players, my_roster_id):
+    """Verletzte Free Agents mit Stash-Potenzial: aktuell nicht einsetzbar,
+    aber mit Produktions-Historie oder Marktwert, die einen Stash für die
+    Rückkehr rechtfertigen könnte. Sleeper liefert kein strukturiertes
+    Rückkehr-Datum - das wird hier offen benannt statt geraten."""
+    out = []
+    for p in players.values():
+        if p["fantasy_team"] is not None:
+            continue
+        if p.get("injury_status") not in STASH_WATCH_STATUSES:
+            continue
+        if p["position"] not in FLEX_ELIGIBLE | {"QB"}:
+            continue
+        has_track_record = (p.get("season_avg") or 0) >= 5 or (p.get("trade_value") or 0) >= 500
+        if not has_track_record:
+            continue
+        out.append({
+            "player_id": p["id"],
+            "injury_status": p["injury_status"],
+            "season_avg": p["season_avg"],
+            "note": (
+                "Status "
+                + p["injury_status"]
+                + " - könnte die Saison verpasst haben oder noch länger ausfallen. "
+                "Sleeper liefert kein Rückkehr-Datum, daher vor dem Stash den aktuellen Status selbst prüfen."
+            ),
+        })
+    out.sort(key=lambda e: e["season_avg"], reverse=True)
+    return out[:8]
+
+
 def _breakouts(free_agents):
     candidates = [
         p for p in free_agents
@@ -259,6 +293,7 @@ def compute(data, league_raw=None, my_roster_raw=None, raw_transactions=None):
         "lineup_upgrades": lineup_upgrades[:8],
         "trending": [p["id"] for p in trending_list],
         "handcuffs": _handcuffs(players, my_roster_id),
+        "ir_stashes": _ir_stashes(players, my_roster_id),
         "breakouts": _breakouts(free_agents),
         "streaming": _streaming_tips(free_agents),
         "injury_replacements": injury_replacements(data),

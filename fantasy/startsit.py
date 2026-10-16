@@ -36,7 +36,8 @@ def _effective_projection(p):
     return round(base * mult * factor, 2)
 
 
-def _best_lineup(pool, roster_positions):
+def _best_lineup(pool, roster_positions, flex_positions=None):
+    flex_positions = flex_positions or FLEX_ELIGIBLE
     by_pos = {"QB": [], "RB": [], "WR": [], "TE": [], "K": [], "DEF": []}
     for p in pool:
         if p["position"] in by_pos:
@@ -62,7 +63,7 @@ def _best_lineup(pool, roster_positions):
 
     pools_by_label = {pos: take(pos, n) for pos, n in counts.items()}
 
-    flex_candidates = [p for pos in FLEX_ELIGIBLE for p in by_pos[pos] if p["id"] not in used_ids]
+    flex_candidates = [p for pos in flex_positions for p in by_pos[pos] if p["id"] not in used_ids]
     flex_candidates.sort(key=lambda p: p["_eff"], reverse=True)
     flex = flex_candidates[:n_flex]
     for p in flex:

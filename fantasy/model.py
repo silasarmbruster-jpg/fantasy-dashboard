@@ -3,10 +3,9 @@ data.json-Modell, das das Frontend konsumiert."""
 
 from datetime import datetime, timezone
 
-from . import config, waiver, startsit, tradefinder, planner, league_feed, sellhigh, playoffs
+from . import config, waiver, startsit, tradefinder, planner, league_feed, sellhigh, playoffs, matchup_sim
 from . import roster_strength
 from .scoring import score as score_stats
-from .util import win_probability
 
 MATCHUP_POSITIONS = ("QB", "RB", "WR", "TE", "K")
 
@@ -153,7 +152,7 @@ def _team_week_share_totals(weekly_stats_by_week, players_db, current_week):
 
 def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_proj,
                     current_week, bye_weeks, trade_values, trending_add, trending_drop,
-                    rest_of_season, team_week_totals, vegas_odds, trade_value_history):
+                    team_week_totals, vegas_odds, trade_value_history):
     fantasy_positions = pinfo.get("fantasy_positions") or []
     primary_position = pinfo.get("position")
     # Spieler mit Doppel-Listung (z.B. WR/DB) sollen mit ihrer fantasy-relevanten
@@ -271,7 +270,6 @@ def _player_record(pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_pr
         "trade_value_history": trade_value_history.get(pid, []),
         "trending_add": trending_add.get(pid),
         "trending_drop": trending_drop.get(pid),
-        "rest_of_season": rest_of_season.get(team, []) if team else [],
         "vegas": vegas,
         "fantasy_team": None,  # wird nach dem Aufbau der Teams gefüllt
     }
@@ -283,7 +281,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
           future_matchups_by_week=None, transactions=None,
           vegas_odds=None, trade_value_history=None,
           historical_matchups_by_week=None, sim_matchups_by_week=None,
-          source_status=None):
+          source_status=None, league_rules=None):
     season = state["season"]
     current_week = state.get("display_week") or state.get("week") or 1
     scoring_settings = league.get("scoring_settings", {})
@@ -308,7 +306,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
         players[pid] = _player_record(
             pid, pinfo, scoring_settings, weekly_stats_by_week, weekly_proj,
             current_week, bye_weeks, trade_values, trending_add, trending_drop,
-            rest_of_season, team_week_totals, vegas_odds, trade_value_history,
+            team_week_totals, vegas_odds, trade_value_history,
         )
 
     # --- Matchup-Stärke (für diese Woche) je Spieler ---
@@ -377,6 +375,20 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
                     "team_name": team["team_name"],
                 }
 
+    # Sleeper-Altlasten raus: Spieler ohne Stats, ohne Projection und ohne
+    # Roster-Zugehörigkeit (z.B. längst zurückgetretene Spieler, die über
+    # die Free-Agent-Auswahl reingerutscht sind). DEF immer behalten (fixe,
+    # kleine Menge, immer relevant).
+    players = {
+        pid: p for pid, p in players.items()
+        if p["position"] == "DEF"
+        or p["fantasy_team"] is not None
+        or p["season_total"] > 0
+        or p["projection_week"] > 0
+        or p.get("trending_add")
+        or p.get("trending_drop")
+    }
+
     # --- Ich ---
     me_user = next(
         (u for u in users if (u.get("display_name") or "").lower() == my_username.lower()),
@@ -436,8 +448,7 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
 
         win_prob = None
         if opp_side is not None:
-            diff = me_side["projected_points"] - opp_side["projected_points"]
-            win_prob = win_probability(diff)
+            win_prob = matchup_sim.simulate_win_probability(me_side["starters"], opp_side["starters"], players)
 
         matchup_block = {
             "week": current_week,
@@ -458,6 +469,9 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             "playoff_teams": league["settings"].get("playoff_teams"),
             "trade_deadline": league["settings"].get("trade_deadline"),
             "roster_positions": roster_positions,
+            "league_type": (league_rules or {}).get("league_type"),
+            "is_dynasty": (league_rules or {}).get("is_dynasty", False),
+            "super_flex": (league_rules or {}).get("super_flex", False),
         },
         "me": {
             **me_roster,
@@ -471,12 +485,15 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             "reserve": reserve,
         },
         "players": players,
+        # Restprogramm pro NFL-Team statt dupliziert pro Spieler (viele
+        # Spieler teilen sich dasselbe Team) - Frontend merged über p.team.
+        "team_schedules": rest_of_season,
     }
     data["waiver"] = waiver.compute(data, league_raw=league, my_roster_raw=my_roster_obj, raw_transactions=transactions or [])
     data["start_sit"] = startsit.compute(data)
     data["planner"] = planner.compute(data, future_matchups_by_week or {})
-    data["trade_finder"] = tradefinder.compute(data)
     data["position_strength"] = roster_strength.position_rank_matrix(teams, players)
+    data["sell_buy"] = sellhigh.compute(data)
     data["league_feed"] = {
         "power_ranking": league_feed.power_ranking(teams),
         "transactions": league_feed.normalize_transactions(transactions or [], roster_by_id),
@@ -486,12 +503,13 @@ def build(*, state, league, rosters, users, matchups, players_db, schedule,
             data["position_strength"],
         ),
     }
-    data["sell_buy"] = sellhigh.compute(data)
+    data["trade_finder"] = tradefinder.compute(data, league_rules or {}, bye_weeks)
     data["playoffs"] = playoffs.compute(
         teams,
         historical_matchups_by_week or {},
         sim_matchups_by_week or {},
         league["settings"].get("playoff_teams") or 6,
+        my_roster_id=me_roster["roster_id"],
     )
     data["meta"] = {"source_status": source_status or {}}
     return data

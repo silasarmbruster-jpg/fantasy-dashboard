@@ -1,11 +1,13 @@
 """Verwaltet history.json im Repo-Root: Trade-Wert-Verlauf über die Zeit,
-damit die Spieler-Detailansicht eine kleine Kurve zeigen kann. Wird bei
-jedem Build-Lauf um den aktuellen Lauf ergänzt und auf die letzten
-MAX_RUNS Läufe begrenzt, damit die Datei nicht unbegrenzt wächst."""
+damit die Spieler-Detailansicht eine kleine Kurve zeigen kann. Höchstens
+ein Eintrag pro Kalendertag (mehrere Läufe am selben Tag überschreiben den
+Tageseintrag statt einen neuen anzuhängen - an Spieltagen läuft der
+Workflow bis zu zweimal), auf die letzten MAX_RUNS Tage begrenzt, damit
+die Datei nicht unbegrenzt wächst."""
 
 import json
 
-MAX_RUNS = 60
+MAX_RUNS = 60  # Tage, nicht Build-Läufe (siehe build_updated)
 MAX_POINTS_PER_PLAYER = 14
 
 
@@ -22,12 +24,17 @@ def load(path):
 
 
 def build_updated(path, run_date, trade_values):
-    """Hängt den aktuellen Lauf im Speicher an, schreibt aber noch nichts auf
-    die Platte - das macht erst save(), nachdem die Plausibilitätsprüfung
-    des Build-Laufs bestanden hat."""
+    """Hängt den aktuellen Lauf im Speicher an (oder überschreibt den
+    heutigen Eintrag, falls schon einer existiert), schreibt aber noch
+    nichts auf die Platte - das macht erst save(), nachdem die
+    Plausibilitätsprüfung des Build-Laufs bestanden hat."""
     hist = load(path)
     values = {pid: tv["value"] for pid, tv in trade_values.items() if tv.get("value") is not None}
-    hist["runs"].append({"date": run_date, "values": values})
+    today = run_date[:10]  # YYYY-MM-DD-Teil des ISO-Zeitstempels
+    if hist["runs"] and hist["runs"][-1]["date"][:10] == today:
+        hist["runs"][-1] = {"date": run_date, "values": values}
+    else:
+        hist["runs"].append({"date": run_date, "values": values})
     hist["runs"] = hist["runs"][-MAX_RUNS:]
     return hist
 

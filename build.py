@@ -19,9 +19,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from fantasy import config, model, history, espn_odds
+import subprocess
+
+from fantasy import config, model, history, espn_odds, league_rules
 from fantasy import sleeper_api as sleeper
 from fantasy import fantasycalc_api
+from fantasy import tradefinder
 
 
 def log(msg):
@@ -163,8 +166,17 @@ def main():
         weekly_proj = {}
         source_status["projections"] = f"fehlgeschlagen: {exc}"
 
+    rules = league_rules.parse(league)
+    log(
+        f"Liga-Regeln gelesen: Typ={['Redraft','Keeper','Dynasty'][rules['league_type']] if rules['league_type'] in (0,1,2) else rules['league_type']}, "
+        f"SUPER_FLEX={rules['super_flex']}, PPR={rules['ppr']}, Trade-Deadline=Woche {rules['trade_deadline']}."
+    )
+
     log("Lade FantasyCalc Trade-Werte ...")
-    trade_values = fantasycalc_api.get_trade_values()
+    trade_values = fantasycalc_api.get_trade_values(
+        is_dynasty=rules["is_dynasty"], num_qbs=rules["num_qbs_fantasycalc"],
+        num_teams=rules["num_teams"] or 14, ppr=rules["ppr"],
+    )
     if not trade_values:
         log("WARNUNG: Keine FantasyCalc-Werte erhalten, Trade-Werte bleiben leer.")
         source_status["fantasycalc"] = "fehlgeschlagen: leere Antwort"
@@ -247,6 +259,7 @@ def main():
         historical_matchups_by_week=historical_matchups_by_week,
         sim_matchups_by_week=sim_matchups_by_week,
         source_status=source_status,
+        league_rules=rules,
     )
 
     log("Prüfe Plausibilität des Build-Laufs ...")
@@ -258,6 +271,28 @@ def main():
         log("docs/data.json und history.json werden NICHT verändert - die zuletzt veröffentlichte Version bleibt live.")
         sys.exit(1)
     log("Plausibilitätsprüfung bestanden.")
+
+    log("Prüfe Trade-Finder-Invarianten (kein K/DEF, jeder Vorschlag hat ein Zweck-Label, keine Duplikate) ...")
+    tf_errors = tradefinder.validate_proposals(data["trade_finder"], data["players"])
+    if tf_errors:
+        log("FEHLER: Trade-Finder-Invarianten verletzt, Lauf wird verworfen:")
+        for e in tf_errors[:20]:
+            log(f"  - {e}")
+        log("docs/data.json und history.json werden NICHT verändert - die zuletzt veröffentlichte Version bleibt live.")
+        sys.exit(1)
+    log(f"Trade-Finder-Invarianten bestanden ({len(data['trade_finder']['proposals'])} Vorschläge geprüft).")
+
+    log("Führe pytest-Testsuite aus ...")
+    tests_dir = ROOT / "tests"
+    if tests_dir.exists():
+        result = subprocess.run([sys.executable, "-m", "pytest", str(tests_dir), "-q"], cwd=ROOT)
+        if result.returncode != 0:
+            log("FEHLER: pytest-Tests fehlgeschlagen, Lauf wird verworfen (siehe Ausgabe oben).")
+            log("docs/data.json und history.json werden NICHT verändert - die zuletzt veröffentlichte Version bleibt live.")
+            sys.exit(1)
+        log("pytest-Tests bestanden.")
+    else:
+        log("WARNUNG: tests/-Verzeichnis nicht gefunden, pytest-Lauf übersprungen.")
 
     history.save(history_path, hist)
     log(f"history.json aktualisiert ({len(hist['runs'])} Läufe gespeichert).")
