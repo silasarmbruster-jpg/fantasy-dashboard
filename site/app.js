@@ -1760,10 +1760,13 @@
   }
 
   function buildPackageCard(c) {
-    const card = el("div", { class: "card" });
+    const card = el("div", { class: "card", style: c.top_empfehlung ? "border:1.5px solid var(--status-warn);" : "" });
     const status = getTradeStatus(c);
 
     const headerPills = [
+      c.top_empfehlung
+        ? el("span", { class: "tab-pill", style: "cursor:default;background:var(--status-warn);color:#fff;border-color:transparent;display:inline-flex;align-items:center;gap:4px;font-weight:700;" }, [icon("star", { style: "width:11px;height:11px;" }), "Top-Empfehlung"])
+        : null,
       el("span", { class: "tab-pill", style: "cursor:default;background:var(--accent-soft);color:var(--accent);border-color:transparent;" }, c.label),
       c.idea_label && c.idea_label !== c.label ? el("span", { class: "tab-pill", style: "cursor:default;" }, c.idea_label) : null,
       c.is_win_win ? el("span", { class: "tab-pill", style: "cursor:default;background:var(--status-good);color:#fff;border-color:transparent;display:inline-flex;align-items:center;gap:4px;" }, [icon("handshake", { style: "width:11px;height:11px;" }), "Win-Win"]) : null,
